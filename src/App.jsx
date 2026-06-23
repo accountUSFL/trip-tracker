@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { supabase } from "./supabaseClient";
 
-// ── Driver config ─────────────────────────────────────────────────────────────
+// ── Hardcoded driver defaults (used as fallback when Supabase driver_settings is empty) ──
 const DRIVERS = {
   "Allen Deandra":         { type: "regional", rate: 255 },
   "Angel Leonardo":        { type: "regional", rate: 255 },
@@ -29,7 +29,6 @@ const DRIVERS = {
   "Gene Yeats":            { type: "local",    rate: 255 },
   "Rarold Harvey":         { type: "local",    rate: 255 },
 };
-const DRIVER_NAMES = Object.keys(DRIVERS).sort();
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const STATUS_COLORS = {
@@ -108,12 +107,28 @@ function isoToLocal(isoStr) {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
+// Merge Supabase driver_settings rows with hardcoded DRIVERS defaults
+// Returns { [name]: { type, rate } }
+function buildDriversMap(settingsRows) {
+  const map = Object.fromEntries(
+    Object.entries(DRIVERS).map(([k, v]) => [k, { type: v.type, rate: v.rate }])
+  );
+  if (settingsRows) {
+    settingsRows.forEach(r => {
+      map[r.driver] = {
+        type: r.type || map[r.driver]?.type || "regional",
+        rate: r.rate,
+      };
+    });
+  }
+  return map;
+}
+
 // ── Pay calculation ───────────────────────────────────────────────────────────
-function calculatePay(trip, rate) {
-  const driverType = DRIVERS[trip.driver]?.type ?? "regional";
+function calculatePay(trip, rate, driverType = "regional") {
   const base       = driverType === "local" ? rate : (trip.isRoundTrip ? rate : rate / 2);
-  const liveLoad   = trip.trip1LoadType === "Live Load"    ? 40 : 0;
-  const liveUnload = trip.trip2LoadType === "Live Unload"  ? 40 : 0;
+  const liveLoad   = trip.trip1LoadType === "Live Load"   ? 40 : 0;
+  const liveUnload = trip.trip2LoadType === "Live Unload" ? 40 : 0;
   const breakdown  = (parseFloat(trip.breakdownHours) || 0) * 10;
   const btt        = trip.backToTerminal ? 70 : 0;
   const detention  = (parseFloat(trip.detentionHours) || 0) * 15;
@@ -160,60 +175,268 @@ function tripFromDb(row) {
   };
 }
 
-// ── Extra Pay section (shared by both form types) ─────────────────────────────
+// ── Shared: Extra Pay section ─────────────────────────────────────────────────
 function ExtraPaySection({ form, set }) {
   return (
     <div style={{ background: C.card, borderRadius: 12, padding: 16, border: `1px solid ${C.border}` }}>
       <div style={{ fontWeight: 700, color: C.accent, marginBottom: 14, fontSize: 14 }}>
         💰 Extra Pay <span style={{ color: C.muted, fontWeight: 400 }}>(optional)</span>
       </div>
-
       <div style={{ marginBottom: 14 }}>
         <label style={lbl}>Breakdown — hours beyond 1hr free</label>
-        <input
-          type="number" min="0" step="0.5"
-          value={form.breakdownHours}
-          onChange={e => set("breakdownHours", e.target.value)}
-          placeholder="0"
-          style={{ ...inp }}
-        />
+        <input type="number" min="0" step="0.5" value={form.breakdownHours}
+          onChange={e => set("breakdownHours", e.target.value)} placeholder="0" style={inp} />
         <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>$10 / hr · enter hours past the free 1st hour</div>
       </div>
-
       <div style={{ marginBottom: 14 }}>
         <label style={{ fontSize: 13, color: C.dim, fontWeight: 600, display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={form.backToTerminal}
-            onChange={e => set("backToTerminal", e.target.checked)}
-            style={{ width: 18, height: 18, accentColor: C.accent, cursor: "pointer" }}
-          />
+          <input type="checkbox" checked={form.backToTerminal} onChange={e => set("backToTerminal", e.target.checked)}
+            style={{ width: 18, height: 18, accentColor: C.accent, cursor: "pointer" }} />
           Back to Terminal — $70 flat
         </label>
       </div>
-
       <div>
         <label style={lbl}>Detention — hours beyond 3hr free</label>
-        <input
-          type="number" min="0" step="0.5"
-          value={form.detentionHours}
-          onChange={e => set("detentionHours", e.target.value)}
-          placeholder="0"
-          style={{ ...inp }}
-        />
+        <input type="number" min="0" step="0.5" value={form.detentionHours}
+          onChange={e => set("detentionHours", e.target.value)} placeholder="0" style={inp} />
         <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>$15 / hr · enter hours past the free 3hrs</div>
       </div>
     </div>
   );
 }
 
+// ── PIN Keypad ────────────────────────────────────────────────────────────────
+function PinKeypad({ onDigit, onBackspace, disabled }) {
+  const keys = [["1","2","3"],["4","5","6"],["7","8","9"]];
+  const kStyle = {
+    background: C.card, border: `1px solid ${C.border}`, borderRadius: 12,
+    color: C.text, fontSize: 26, fontWeight: 700, padding: "18px 0",
+    cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1,
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {keys.map(row => (
+        <div key={row[0]} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          {row.map(d => (
+            <button key={d} disabled={disabled} onClick={() => onDigit(d)} style={kStyle}>{d}</button>
+          ))}
+        </div>
+      ))}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        <div />
+        <button disabled={disabled} onClick={() => onDigit("0")} style={kStyle}>0</button>
+        <button disabled={disabled} onClick={onBackspace}
+          style={{ ...kStyle, fontSize: 20, color: C.muted }}>⌫</button>
+      </div>
+    </div>
+  );
+}
+
+// ── DRIVER LOGIN SCREEN ───────────────────────────────────────────────────────
+function DriverLoginScreen({ onLogin }) {
+  const [allDrivers, setAllDrivers]     = useState([]);
+  const [loadingDrivers, setLoadingDrivers] = useState(true);
+  const [nameInput, setNameInput]       = useState("");
+  const [suggestions, setSuggestions]   = useState([]);
+  const [showSugg, setShowSugg]         = useState(false);
+  const [selectedName, setSelectedName] = useState(null);
+  const [stage, setStage]               = useState("name"); // "name" | "pin" | "nopin"
+  const [pin, setPin]                   = useState("");
+  const [pinError, setPinError]         = useState("");
+  const [shake, setShake]               = useState(false);
+  const [verifying, setVerifying]       = useState(false);
+  const [checkingPin, setCheckingPin]   = useState(false);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    async function load() {
+      const { data } = await supabase.from("driver_settings").select("*");
+      const map = buildDriversMap(data);
+      setAllDrivers(Object.entries(map).map(([name, d]) => ({ name, ...d })).sort((a, b) => a.name.localeCompare(b.name)));
+      setLoadingDrivers(false);
+    }
+    load();
+  }, []);
+
+  const validNames = allDrivers.map(d => d.name);
+
+  function handleNameInput(val) {
+    setNameInput(val);
+    setSelectedName(null);
+    if (val.trim() === "") { setSuggestions([]); return; }
+    setSuggestions(validNames.filter(n => n.toLowerCase().includes(val.toLowerCase())).slice(0, 8));
+  }
+
+  function selectSuggestion(name) {
+    setNameInput(name);
+    setSelectedName(name);
+    setSuggestions([]);
+    setShowSugg(false);
+  }
+
+  async function proceedToPin() {
+    if (!selectedName) return;
+    setCheckingPin(true);
+    const { data } = await supabase.from("driver_pins").select("pin").eq("driver_name", selectedName).maybeSingle();
+    setCheckingPin(false);
+    if (!data) { setStage("nopin"); return; }
+    setStage("pin");
+    setPin("");
+    setPinError("");
+  }
+
+  async function handleDigit(digit) {
+    if (verifying) return;
+    const newPin = pin + digit;
+    if (newPin.length > 4) return;
+    setPin(newPin);
+    if (newPin.length === 4) {
+      setVerifying(true);
+      const { data } = await supabase.from("driver_pins").select("pin").eq("driver_name", selectedName).maybeSingle();
+      if (data && data.pin === newPin) {
+        const driverInfo = allDrivers.find(d => d.name === selectedName);
+        sessionStorage.setItem("driverSession", JSON.stringify({
+          driverName: selectedName,
+          driverType: driverInfo?.type ?? "regional",
+          driverRate: driverInfo?.rate ?? 255,
+        }));
+        onLogin();
+      } else {
+        setShake(true);
+        setTimeout(() => {
+          setShake(false);
+          setPin("");
+          setPinError("Incorrect PIN — try again");
+          setVerifying(false);
+        }, 500);
+      }
+    }
+  }
+
+  function handleBackspace() {
+    if (verifying) return;
+    setPin(p => p.slice(0, -1));
+    setPinError("");
+  }
+
+  if (loadingDrivers) return (
+    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ color: C.muted, fontSize: 16 }}>Loading…</div>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <style>{`@keyframes driverShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-10px)}40%{transform:translateX(10px)}60%{transform:translateX(-10px)}80%{transform:translateX(10px)}}`}</style>
+
+      <div style={{ width: "100%", maxWidth: 380 }}>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontSize: 52, marginBottom: 10 }}>🚛</div>
+          <div style={{ fontSize: 24, fontWeight: 800, color: C.text }}>Driver Check-In</div>
+          <div style={{ color: C.muted, fontSize: 14, marginTop: 6 }}>USFL Transit</div>
+        </div>
+
+        {/* NAME STAGE */}
+        {stage === "name" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ position: "relative" }}>
+              <label style={lbl}>Your name</label>
+              <input
+                ref={inputRef}
+                type="text"
+                value={nameInput}
+                onChange={e => handleNameInput(e.target.value)}
+                onFocus={() => setShowSugg(true)}
+                onBlur={() => setTimeout(() => setShowSugg(false), 150)}
+                placeholder="Start typing your name…"
+                style={{ ...inp, fontSize: 16 }}
+                autoComplete="off"
+                autoFocus
+              />
+              {showSugg && suggestions.length > 0 && (
+                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, zIndex: 50, marginTop: 4, overflow: "hidden" }}>
+                  {suggestions.map(name => (
+                    <div key={name}
+                      onMouseDown={() => selectSuggestion(name)}
+                      style={{ padding: "12px 16px", cursor: "pointer", color: C.text, fontSize: 15, borderBottom: `1px solid ${C.border}` }}
+                      onMouseEnter={e => e.currentTarget.style.background = C.surface}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                    >
+                      {name}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={proceedToPin}
+              disabled={!selectedName || checkingPin}
+              style={{ ...btn(), opacity: (selectedName && !checkingPin) ? 1 : 0.4 }}>
+              {checkingPin ? "Checking…" : "Next →"}
+            </button>
+          </div>
+        )}
+
+        {/* NO PIN SET */}
+        {stage === "nopin" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ background: "#1e1b4b", border: "1px solid #4f46e5", borderRadius: 12, padding: "18px 20px", textAlign: "center" }}>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>🔒</div>
+              <div style={{ color: "#a5b4fc", fontWeight: 700, fontSize: 15, marginBottom: 6 }}>PIN not set yet</div>
+              <div style={{ color: C.muted, fontSize: 13 }}>Your PIN hasn't been set up yet. Ask your manager to set it up.</div>
+            </div>
+            <button onClick={() => { setStage("name"); setSelectedName(null); setNameInput(""); }}
+              style={btn("secondary")}>
+              ← Back
+            </button>
+          </div>
+        )}
+
+        {/* PIN STAGE */}
+        {stage === "pin" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ color: C.dim, fontSize: 15, marginBottom: 16 }}>
+                Welcome, <strong style={{ color: C.text }}>{selectedName}</strong>
+              </div>
+              <div style={{ color: C.muted, fontSize: 13, marginBottom: 20 }}>Enter your 4-digit PIN</div>
+              {/* PIN dots */}
+              <div style={{ display: "flex", justifyContent: "center", gap: 16, marginBottom: 8,
+                animation: shake ? "driverShake 0.4s ease" : "none" }}>
+                {[0, 1, 2, 3].map(i => (
+                  <div key={i} style={{
+                    width: 20, height: 20, borderRadius: "50%",
+                    background: i < pin.length ? C.accent : C.border,
+                    transition: "background 0.15s",
+                  }} />
+                ))}
+              </div>
+              {pinError && <div style={{ color: "#fca5a5", fontSize: 13, marginTop: 8 }}>{pinError}</div>}
+            </div>
+
+            <PinKeypad onDigit={handleDigit} onBackspace={handleBackspace} disabled={verifying} />
+
+            <button onClick={() => { setStage("name"); setPin(""); setPinError(""); setSelectedName(null); setNameInput(""); }}
+              style={{ ...btn("secondary"), fontSize: 13, padding: "10px" }}>
+              ← Different name
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── DRIVER FORM ───────────────────────────────────────────────────────────────
-function DriverForm() {
+// session = { driverName, driverType, driverRate }
+function DriverForm({ session, onLogout }) {
+  const { driverName, driverType, driverRate } = session;
+
   const now      = new Date();
   const localNow = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
   const blankForm = {
-    driver: "", originCity: "", route: "", isRoundTrip: true,
+    originCity: "", route: "", isRoundTrip: true,
     trip1LoadType: "", trip2LoadType: "",
     startDateTime: "", endDateTime: localNow, notes: "", status: "Completed",
     breakdownHours: "", backToTerminal: false, detentionHours: "",
@@ -225,25 +448,27 @@ function DriverForm() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError]           = useState("");
 
-  const set        = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const driverType = DRIVERS[form.driver]?.type ?? null;
-  const overnight  = isOvernight(form.startDateTime, form.endDateTime);
-  const duration   = tripDuration(form.startDateTime, form.endDateTime);
-
-  function handleDriverChange(name) {
-    setForm({ ...blankForm, driver: name });
-  }
+  const set      = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const overnight = isOvernight(form.startDateTime, form.endDateTime);
+  const duration  = tripDuration(form.startDateTime, form.endDateTime);
 
   async function submit() {
     setSubmitting(true);
     setError("");
-    const { error: err } = await supabase.from("trips").insert(tripToDb(form));
+    const { error: err } = await supabase.from("trips").insert(tripToDb({ ...form, driver: driverName }));
     setSubmitting(false);
     if (err) { setError("Something went wrong. Please try again."); return; }
     setDone(true);
   }
 
   function reset() { setDone(false); setStep(1); setForm(blankForm); }
+
+  // Step 1 validation
+  const step1Valid = driverType === "local"
+    ? !!form.startDateTime
+    : !!(form.startDateTime && form.endDateTime && form.originCity && form.trip1LoadType && (!form.isRoundTrip || form.trip2LoadType));
+
+  const STEPS = 2;
 
   if (done) return (
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
@@ -258,52 +483,35 @@ function DriverForm() {
     </div>
   );
 
-  // Step 2 validation
-  const step2Valid = driverType === "local"
-    ? !!form.startDateTime
-    : !!(form.startDateTime && form.endDateTime && form.originCity && form.trip1LoadType && (!form.isRoundTrip || form.trip2LoadType));
-
   return (
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column" }}>
       {/* Header */}
       <div style={{ background: C.accent, padding: "18px 20px 14px" }}>
-        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.7)", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase" }}>End-of-Shift Report</div>
-        <div style={{ fontSize: 20, fontWeight: 800, color: "#fff", marginTop: 2 }}>🚛 Trip Check-In</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 2 }}>
+          <div style={{ fontSize: 13, color: "rgba(255,255,255,0.7)", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            End-of-Shift Report
+          </div>
+          <button onClick={onLogout}
+            style={{ background: "rgba(0,0,0,0.2)", border: "none", borderRadius: 8, color: "rgba(255,255,255,0.8)", fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
+            Not you?
+          </button>
+        </div>
+        <div style={{ fontSize: 20, fontWeight: 800, color: "#fff" }}>🚛 {driverName}</div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)", marginTop: 2 }}>
+          {driverType === "local" ? "🏙️ Local Driver" : "🛣️ Regional Driver"}
+        </div>
         <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
-          {[1, 2, 3].map(i => (
-            <div key={i} style={{ height: 4, flex: 1, borderRadius: 4, background: i <= step ? "#fff" : "rgba(255,255,255,0.3)", transition: "background 0.3s" }} />
+          {Array.from({ length: STEPS }, (_, i) => (
+            <div key={i} style={{ height: 4, flex: 1, borderRadius: 4, background: (i + 1) <= step ? "#fff" : "rgba(255,255,255,0.3)", transition: "background 0.3s" }} />
           ))}
         </div>
       </div>
 
       <div style={{ flex: 1, padding: "24px 20px", display: "flex", flexDirection: "column", gap: 20 }}>
 
-        {/* STEP 1 — Who are you */}
-        {step === 1 && <>
-          <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>Who are you?</div>
-          <div>
-            <label style={lbl}>Your name</label>
-            <select value={form.driver} onChange={e => handleDriverChange(e.target.value)} style={{ ...inp, fontSize: 16 }}>
-              <option value="">Select your name…</option>
-              {DRIVER_NAMES.map(d => <option key={d}>{d}</option>)}
-            </select>
-          </div>
-          {form.driver && (
-            <div style={{ background: C.card, borderRadius: 10, padding: "10px 14px", border: `1px solid ${C.border}`, fontSize: 13, color: C.dim }}>
-              {driverType === "local"
-                ? "🏙️ Local driver — you'll log a 12-hour shift"
-                : "🛣️ Regional driver — you'll log a Cali ↔ Vegas route"}
-            </div>
-          )}
-          <button style={{ ...btn(), opacity: form.driver ? 1 : 0.4 }} disabled={!form.driver} onClick={() => setStep(2)}>
-            Next →
-          </button>
-        </>}
-
-        {/* STEP 2 — LOCAL: 12-Hour Shift */}
-        {step === 2 && driverType === "local" && <>
+        {/* STEP 1 — LOCAL: 12-Hour Shift */}
+        {step === 1 && driverType === "local" && <>
           <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>12-Hour Shift</div>
-
           <div>
             <label style={lbl}>Shift Start</label>
             <input type="datetime-local" value={form.startDateTime} onChange={e => set("startDateTime", e.target.value)} style={inp} />
@@ -313,40 +521,26 @@ function DriverForm() {
             <input type="datetime-local" value={form.endDateTime} onChange={e => set("endDateTime", e.target.value)} style={inp} />
             <div style={{ fontSize: 12, color: C.muted, marginTop: 5 }}>Pre-filled to right now — adjust if needed</div>
           </div>
-          {duration && (
-            <div style={{ color: C.muted, fontSize: 13, textAlign: "center" }}>
-              ⏱ Shift length: <strong style={{ color: C.dim }}>{duration}</strong>
-            </div>
-          )}
+          {duration && <div style={{ color: C.muted, fontSize: 13, textAlign: "center" }}>⏱ Shift length: <strong style={{ color: C.dim }}>{duration}</strong></div>}
           <div>
             <label style={lbl}>Anything to note? (optional)</label>
-            <input type="text" value={form.notes} onChange={e => set("notes", e.target.value)}
-              placeholder="e.g. route details, issues…" style={inp} />
+            <input type="text" value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="e.g. route details, issues…" style={inp} />
           </div>
-
           <ExtraPaySection form={form} set={set} />
-
-          <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={() => setStep(1)} style={{ ...btn("secondary"), flex: "0 0 80px" }}>← Back</button>
-            <button onClick={() => setStep(3)} disabled={!step2Valid}
-              style={{ ...btn(), flex: 1, opacity: step2Valid ? 1 : 0.4 }}>
-              Review →
-            </button>
-          </div>
+          <button onClick={() => setStep(2)} disabled={!step1Valid}
+            style={{ ...btn(), opacity: step1Valid ? 1 : 0.4 }}>
+            Review →
+          </button>
         </>}
 
-        {/* STEP 2 — REGIONAL: full route form */}
-        {step === 2 && driverType === "regional" && <>
+        {/* STEP 1 — REGIONAL: full route form */}
+        {step === 1 && driverType === "regional" && <>
           <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>What did you haul?</div>
 
-          {/* Starting city */}
           <div>
             <label style={lbl}>Where did your trip START?</label>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              {[
-                { label: "🌴 Starting from Cali", city: "Cali" },
-                { label: "🎰 Starting from Vegas", city: "Vegas" },
-              ].map(opt => (
+              {[{ label: "🌴 Starting from Cali", city: "Cali" }, { label: "🎰 Starting from Vegas", city: "Vegas" }].map(opt => (
                 <button key={opt.city}
                   onClick={() => { set("originCity", opt.city); set("trip1LoadType", ""); set("trip2LoadType", ""); }}
                   style={{ border: `2px solid ${form.originCity === opt.city ? C.accent : C.border}`, borderRadius: 10, padding: "14px 10px", background: form.originCity === opt.city ? "#2a1a0e" : C.card, color: form.originCity === opt.city ? C.accent : C.dim, fontWeight: 700, fontSize: 13, cursor: "pointer", textAlign: "center" }}>
@@ -356,20 +550,12 @@ function DriverForm() {
             </div>
           </div>
 
-          {/* Trip type */}
           {form.originCity && <div>
             <label style={lbl}>Trip Type</label>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              {[
-                { label: "↩ Round Trip", rt: true },
-                { label: "→ One Way",    rt: false },
-              ].map(opt => (
+              {[{ label: "↩ Round Trip", rt: true }, { label: "→ One Way", rt: false }].map(opt => (
                 <button key={String(opt.rt)}
-                  onClick={() => {
-                    set("isRoundTrip", opt.rt);
-                    set("route", `${form.originCity === "Cali" ? "Cali → Las Vegas" : "Vegas → Cali"} (${opt.rt ? "Round Trip" : "One Way"})`);
-                    set("trip2LoadType", "");
-                  }}
+                  onClick={() => { set("isRoundTrip", opt.rt); set("route", `${form.originCity === "Cali" ? "Cali → Las Vegas" : "Vegas → Cali"} (${opt.rt ? "Round Trip" : "One Way"})`); set("trip2LoadType", ""); }}
                   style={{ border: `2px solid ${form.isRoundTrip === opt.rt ? C.accent : C.border}`, borderRadius: 10, padding: "14px 10px", background: form.isRoundTrip === opt.rt ? "#2a1a0e" : C.card, color: form.isRoundTrip === opt.rt ? C.accent : C.dim, fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
                   {opt.label}
                 </button>
@@ -377,20 +563,14 @@ function DriverForm() {
             </div>
           </div>}
 
-          {/* LEG 1 */}
           {form.originCity && <div style={{ background: C.card, borderRadius: 12, padding: 16, border: `1px solid ${C.border}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
               <span style={{ background: C.accent, color: "#fff", borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 800 }}>LEG 1</span>
-              <span style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>
-                {form.originCity === "Cali" ? "Cali → Las Vegas" : "Vegas → Cali"}
-              </span>
+              <span style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>{form.originCity === "Cali" ? "Cali → Las Vegas" : "Vegas → Cali"}</span>
             </div>
             <label style={lbl}>How was the load?</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {[
-                { v: "Live Load",           label: "🔴 Live Load",          desc: "You waited while they loaded the truck" },
-                { v: "Hook (Drop & Hook)",  label: "🟡 Hook (Drop & Hook)", desc: "You picked up a pre-loaded trailer" },
-              ].map(opt => (
+              {[{ v: "Live Load", label: "🔴 Live Load", desc: "You waited while they loaded the truck" }, { v: "Hook (Drop & Hook)", label: "🟡 Hook (Drop & Hook)", desc: "You picked up a pre-loaded trailer" }].map(opt => (
                 <button key={opt.v} onClick={() => set("trip1LoadType", opt.v)}
                   style={{ border: `2px solid ${form.trip1LoadType === opt.v ? C.accent : C.border}`, borderRadius: 10, padding: "12px 14px", background: form.trip1LoadType === opt.v ? "#2a1a0e" : C.bg, color: form.trip1LoadType === opt.v ? C.accent : C.dim, fontWeight: 600, fontSize: 14, cursor: "pointer", textAlign: "left" }}>
                   <div>{opt.label}</div>
@@ -400,20 +580,14 @@ function DriverForm() {
             </div>
           </div>}
 
-          {/* LEG 2 */}
           {form.originCity && form.isRoundTrip && <div style={{ background: C.card, borderRadius: 12, padding: 16, border: `1px solid ${C.border}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
               <span style={{ background: C.blue, color: "#fff", borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 800 }}>LEG 2</span>
-              <span style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>
-                {form.originCity === "Cali" ? "Las Vegas → Cali" : "Cali → Las Vegas"}
-              </span>
+              <span style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>{form.originCity === "Cali" ? "Las Vegas → Cali" : "Cali → Las Vegas"}</span>
             </div>
             <label style={lbl}>How was the load on the way back?</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {[
-                { v: "Live Unload", label: "🔴 Live Unload", desc: "You waited while they unloaded at the dock" },
-                { v: "Drop",        label: "🟡 Drop",        desc: "You dropped the trailer and left" },
-              ].map(opt => (
+              {[{ v: "Live Unload", label: "🔴 Live Unload", desc: "You waited while they unloaded at the dock" }, { v: "Drop", label: "🟡 Drop", desc: "You dropped the trailer and left" }].map(opt => (
                 <button key={opt.v} onClick={() => set("trip2LoadType", opt.v)}
                   style={{ border: `2px solid ${form.trip2LoadType === opt.v ? C.blue : C.border}`, borderRadius: 10, padding: "12px 14px", background: form.trip2LoadType === opt.v ? "#0f2236" : C.bg, color: form.trip2LoadType === opt.v ? "#60a5fa" : C.dim, fontWeight: 600, fontSize: 14, cursor: "pointer", textAlign: "left" }}>
                   <div>{opt.label}</div>
@@ -423,7 +597,6 @@ function DriverForm() {
             </div>
           </div>}
 
-          {/* Times */}
           <div>
             <label style={lbl}>When did your trip START?</label>
             <input type="datetime-local" value={form.startDateTime} onChange={e => set("startDateTime", e.target.value)} style={inp} />
@@ -433,42 +606,30 @@ function DriverForm() {
             <input type="datetime-local" value={form.endDateTime} onChange={e => set("endDateTime", e.target.value)} style={inp} />
             <div style={{ fontSize: 12, color: C.muted, marginTop: 5 }}>Pre-filled to right now — adjust if needed</div>
           </div>
-
           {overnight && (
             <div style={{ background: "#1e1b4b", border: "1px solid #4f46e5", borderRadius: 10, padding: "12px 14px", fontSize: 13, color: "#a5b4fc" }}>
               🌙 <strong>Overnight trip detected</strong> — counts as <strong>1 trip</strong> starting{" "}
               {new Date(form.startDateTime).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}.
             </div>
           )}
-          {duration && (
-            <div style={{ color: C.muted, fontSize: 13, textAlign: "center" }}>
-              ⏱ Total trip time: <strong style={{ color: C.dim }}>{duration}</strong>
-            </div>
-          )}
-
+          {duration && <div style={{ color: C.muted, fontSize: 13, textAlign: "center" }}>⏱ Total trip time: <strong style={{ color: C.dim }}>{duration}</strong></div>}
           <div>
             <label style={lbl}>Anything to note? (optional)</label>
-            <input type="text" value={form.notes} onChange={e => set("notes", e.target.value)}
-              placeholder="e.g. delay at dock, traffic on I-15…" style={inp} />
+            <input type="text" value={form.notes} onChange={e => set("notes", e.target.value)} placeholder="e.g. delay at dock, traffic on I-15…" style={inp} />
           </div>
-
           <ExtraPaySection form={form} set={set} />
-
-          <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={() => setStep(1)} style={{ ...btn("secondary"), flex: "0 0 80px" }}>← Back</button>
-            <button onClick={() => setStep(3)} disabled={!step2Valid}
-              style={{ ...btn(), flex: 1, opacity: step2Valid ? 1 : 0.4 }}>
-              Review →
-            </button>
-          </div>
+          <button onClick={() => setStep(2)} disabled={!step1Valid}
+            style={{ ...btn(), opacity: step1Valid ? 1 : 0.4 }}>
+            Review →
+          </button>
         </>}
 
-        {/* STEP 3 — Confirm */}
-        {step === 3 && <>
+        {/* STEP 2 — Confirm */}
+        {step === 2 && <>
           <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>Confirm your report</div>
           <div style={{ background: C.card, borderRadius: 12, padding: 18, display: "flex", flexDirection: "column", gap: 12, border: `1px solid ${C.border}` }}>
             {[
-              { label: "Driver",   value: form.driver },
+              { label: "Driver",   value: driverName },
               { label: "Type",     value: driverType === "local" ? "🏙️ Local — 12-Hour Shift" : "🛣️ Regional" },
               ...(driverType === "regional" ? [
                 { label: "Started from", value: form.originCity === "Cali" ? "🌴 California" : "🎰 Las Vegas" },
@@ -481,9 +642,9 @@ function DriverForm() {
               { label: driverType === "local" ? "Shift Length" : "Duration", value: duration },
               ...(overnight ? [{ label: "Note", value: "🌙 Overnight — counts as 1 trip" }] : []),
               ...(form.notes ? [{ label: "Notes", value: form.notes }] : []),
-              ...(form.breakdownHours ? [{ label: "Breakdown",  value: `${form.breakdownHours} hr(s) × $10 = $${(parseFloat(form.breakdownHours) * 10).toFixed(0)}` }] : []),
+              ...(form.breakdownHours ? [{ label: "Breakdown", value: `${form.breakdownHours} hr(s) × $10 = $${(parseFloat(form.breakdownHours) * 10).toFixed(0)}` }] : []),
               ...(form.backToTerminal  ? [{ label: "Back to Terminal", value: "$70 flat" }] : []),
-              ...(form.detentionHours  ? [{ label: "Detention",  value: `${form.detentionHours} hr(s) × $15 = $${(parseFloat(form.detentionHours) * 15).toFixed(0)}` }] : []),
+              ...(form.detentionHours  ? [{ label: "Detention", value: `${form.detentionHours} hr(s) × $15 = $${(parseFloat(form.detentionHours) * 15).toFixed(0)}` }] : []),
             ].map(row => (
               <div key={row.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
                 <span style={{ color: C.muted, fontSize: 13, fontWeight: 600, minWidth: 80 }}>{row.label}</span>
@@ -491,15 +652,11 @@ function DriverForm() {
               </div>
             ))}
           </div>
-          {error && (
-            <div style={{ background: "#7f1d1d", border: "1px solid #dc2626", borderRadius: 8, padding: "10px 14px", color: "#fca5a5", fontSize: 13 }}>
-              {error}
-            </div>
-          )}
+          {error && <div style={{ background: "#7f1d1d", border: "1px solid #dc2626", borderRadius: 8, padding: "10px 14px", color: "#fca5a5", fontSize: 13 }}>{error}</div>}
           <button onClick={submit} disabled={submitting} style={{ ...btn(), opacity: submitting ? 0.6 : 1 }}>
             {submitting ? "Submitting…" : "Submit Report ✓"}
           </button>
-          <button onClick={() => setStep(2)} disabled={submitting} style={btn("secondary")}>← Edit</button>
+          <button onClick={() => setStep(1)} disabled={submitting} style={btn("secondary")}>← Edit</button>
         </>}
 
       </div>
@@ -541,20 +698,10 @@ function ManagerLogin({ onLogin }) {
         <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div>
             <label style={lbl}>Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={e => { setPassword(e.target.value); setError(""); }}
-              placeholder="Enter manager password"
-              style={{ ...inp, fontSize: 16 }}
-              autoFocus
-            />
+            <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(""); }}
+              placeholder="Enter manager password" style={{ ...inp, fontSize: 16 }} autoFocus />
           </div>
-          {error && (
-            <div style={{ background: "#7f1d1d", border: "1px solid #dc2626", borderRadius: 8, padding: "10px 14px", color: "#fca5a5", fontSize: 13 }}>
-              {error}
-            </div>
-          )}
+          {error && <div style={{ background: "#7f1d1d", border: "1px solid #dc2626", borderRadius: 8, padding: "10px 14px", color: "#fca5a5", fontSize: 13 }}>{error}</div>}
           <button type="submit" disabled={loading || !password} style={{ ...btn(), opacity: (loading || !password) ? 0.5 : 1 }}>
             {loading ? "Checking…" : "Sign In →"}
           </button>
@@ -577,97 +724,128 @@ function ManagerDashboard({ onLogout }) {
   const [filterStatus, setFilterStatus] = useState("All");
   const [editTrip, setEditTrip]         = useState(null);
 
-  // Payroll rate overrides from Supabase driver_settings
-  const [driverRates, setDriverRates]   = useState({});
-  const [editingRate, setEditingRate]   = useState(null);
-  const [editRateVal, setEditRateVal]   = useState("");
+  // Driver config from Supabase + defaults
+  const [allDriversMap, setAllDriversMap] = useState(() => buildDriversMap(null));
+  const [driverPins, setDriverPins]       = useState({}); // { name: true }
+
+  // Rate editing (payroll tab)
+  const [editingRate, setEditingRate] = useState(null);
+  const [editRateVal, setEditRateVal] = useState("");
+
+  // PIN management (drivers tab)
+  const [settingPinFor, setSettingPinFor] = useState(null);
+  const [newPinVal, setNewPinVal]         = useState("");
+  const [pinSaving, setPinSaving]         = useState(false);
+
+  // Add new driver (drivers tab)
+  const [addingDriver, setAddingDriver] = useState(false);
+  const [newDriver, setNewDriver]       = useState({ name: "", type: "regional", rate: 255, pin: "" });
+  const [savingNewDriver, setSavingNewDriver] = useState(false);
+  const [newDriverErr, setNewDriverErr]       = useState("");
 
   useEffect(() => {
     async function loadTrips() {
-      const { data } = await supabase
-        .from("trips")
-        .select("*")
-        .order("start_date_time", { ascending: false });
+      const { data } = await supabase.from("trips").select("*").order("start_date_time", { ascending: false });
       if (data) setTrips(data.map(tripFromDb));
       setLoading(false);
     }
     loadTrips();
-
-    const channel = supabase
-      .channel("trips-realtime")
+    const channel = supabase.channel("trips-realtime")
       .on("postgres_changes", { event: "*", schema: "public", table: "trips" }, loadTrips)
       .subscribe();
-
     return () => supabase.removeChannel(channel);
   }, []);
 
   useEffect(() => {
-    async function loadRates() {
+    async function loadDriverSettings() {
       const { data } = await supabase.from("driver_settings").select("*");
+      setAllDriversMap(buildDriversMap(data));
+    }
+    loadDriverSettings();
+  }, []);
+
+  useEffect(() => {
+    async function loadPins() {
+      const { data } = await supabase.from("driver_pins").select("driver_name");
       if (data) {
         const map = {};
-        data.forEach(r => { map[r.driver] = r.rate; });
-        setDriverRates(map);
+        data.forEach(r => { map[r.driver_name] = true; });
+        setDriverPins(map);
       }
     }
-    loadRates();
+    loadPins();
   }, []);
 
   function getRate(driverName) {
-    return driverRates[driverName] ?? (DRIVERS[driverName]?.rate ?? 255);
+    return allDriversMap[driverName]?.rate ?? 255;
   }
 
   async function saveRate(driverName) {
     const rate = Number(editRateVal);
     if (!rate || rate <= 0) return;
-    await supabase
-      .from("driver_settings")
-      .upsert({ driver: driverName, rate }, { onConflict: "driver" });
-    setDriverRates(prev => ({ ...prev, [driverName]: rate }));
+    await supabase.from("driver_settings").upsert(
+      { driver: driverName, rate, type: allDriversMap[driverName]?.type ?? "regional" },
+      { onConflict: "driver" }
+    );
+    setAllDriversMap(prev => ({ ...prev, [driverName]: { ...prev[driverName], rate } }));
     setEditingRate(null);
   }
 
-  const mon      = new Date(weekStart + "T00:00:00");
-  const sun      = sunday(mon);
-  const weekTrips = trips.filter(t => {
-    const s = new Date(t.startDateTime);
-    return s >= mon && s <= sun;
-  });
+  async function savePin(driverName) {
+    if (newPinVal.length !== 4) return;
+    setPinSaving(true);
+    await supabase.from("driver_pins").upsert({ driver_name: driverName, pin: newPinVal }, { onConflict: "driver_name" });
+    setDriverPins(prev => ({ ...prev, [driverName]: true }));
+    setSettingPinFor(null);
+    setNewPinVal("");
+    setPinSaving(false);
+  }
 
-  const filtered = weekTrips.filter(t =>
+  async function saveNewDriver() {
+    const { name, type, rate, pin } = newDriver;
+    if (!name.trim()) { setNewDriverErr("Name is required."); return; }
+    if (pin.length !== 4 || !/^\d{4}$/.test(pin)) { setNewDriverErr("PIN must be exactly 4 digits."); return; }
+    setSavingNewDriver(true);
+    await supabase.from("driver_settings").upsert({ driver: name.trim(), type, rate: Number(rate) }, { onConflict: "driver" });
+    await supabase.from("driver_pins").upsert({ driver_name: name.trim(), pin }, { onConflict: "driver_name" });
+    setAllDriversMap(prev => ({ ...prev, [name.trim()]: { type, rate: Number(rate) } }));
+    setDriverPins(prev => ({ ...prev, [name.trim()]: true }));
+    setSavingNewDriver(false);
+    setAddingDriver(false);
+    setNewDriver({ name: "", type: "regional", rate: 255, pin: "" });
+    setNewDriverErr("");
+  }
+
+  const mon       = new Date(weekStart + "T00:00:00");
+  const sun       = sunday(mon);
+  const weekTrips = trips.filter(t => { const s = new Date(t.startDateTime); return s >= mon && s <= sun; });
+  const filtered  = weekTrips.filter(t =>
     (filterDriver === "All" || t.driver === filterDriver) &&
     (filterStatus === "All" || t.status === filterStatus)
   );
-
   const pending   = weekTrips.filter(t => t.status !== "Completed");
   const driverSet = [...new Set(trips.map(t => t.driver))].sort();
 
-  // Payroll rows — only completed trips
   const payrollRows = driverSet.map(driver => {
     const allTrips  = weekTrips.filter(t => t.driver === driver);
     const doneTrips = allTrips.filter(t => t.status === "Completed");
     const rate      = getRate(driver);
-    const tripItems = doneTrips.map(t => {
-      const pay = calculatePay(t, rate);
-      return { trip: t, pay };
-    });
+    const dType     = allDriversMap[driver]?.type ?? "regional";
+    const tripItems = doneTrips.map(t => ({ trip: t, pay: calculatePay(t, rate, dType) }));
     const weekTotal = tripItems.reduce((s, { pay }) => s + pay.total, 0);
-    return { driver, rate, tripItems, weekTotal, pendingCount: allTrips.filter(t => t.status !== "Completed").length };
+    return { driver, rate, dType, tripItems, weekTotal, pendingCount: allTrips.filter(t => t.status !== "Completed").length };
   }).filter(r => r.tripItems.length > 0 || weekTrips.some(t => t.driver === r.driver));
 
-  const fleetTotal = payrollRows.reduce((s, r) => s + r.weekTotal, 0);
+  const fleetTotal   = payrollRows.reduce((s, r) => s + r.weekTotal, 0);
+  const allDriverList = Object.keys(allDriversMap).sort();
 
   async function saveEdit(updated) {
     const { error } = await supabase.from("trips").update(tripToDb(updated)).eq("id", updated.id);
-    if (!error) {
-      setTrips(prev => prev.map(t => t.id === updated.id ? updated : t));
-      setEditTrip(null);
-    }
+    if (!error) { setTrips(prev => prev.map(t => t.id === updated.id ? updated : t)); setEditTrip(null); }
   }
 
   const shiftWeek = n => {
-    const d = new Date(mon);
-    d.setDate(d.getDate() + n * 7);
+    const d = new Date(mon); d.setDate(d.getDate() + n * 7);
     setWeekStart(d.toISOString().slice(0, 10));
   };
 
@@ -692,35 +870,36 @@ function ManagerDashboard({ onLogout }) {
               ⚠️ {pending.length} need update
             </div>
           )}
-          <button
-            onClick={() => { sessionStorage.removeItem("managerAuth"); onLogout(); }}
+          <button onClick={() => { sessionStorage.removeItem("managerAuth"); onLogout(); }}
             style={{ marginLeft: "auto", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.muted, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
             Sign Out
           </button>
         </div>
 
-        {/* Week nav */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.card, borderRadius: 10, padding: "10px 14px", marginBottom: 14, border: `1px solid ${C.border}` }}>
-          <button onClick={() => shiftWeek(-1)} style={{ background: "none", border: "none", color: C.dim, fontSize: 20, cursor: "pointer", padding: "0 4px" }}>‹</button>
-          <div style={{ flex: 1, textAlign: "center" }}>
-            <div style={{ fontSize: 11, color: C.muted, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase" }}>Pay Week</div>
-            <div style={{ fontSize: 14, fontWeight: 700 }}>{fmtDate(mon)} – {fmtDate(sun)}</div>
+        {/* Week nav — hidden on drivers tab */}
+        {tab !== "drivers" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.card, borderRadius: 10, padding: "10px 14px", marginBottom: 14, border: `1px solid ${C.border}` }}>
+            <button onClick={() => shiftWeek(-1)} style={{ background: "none", border: "none", color: C.dim, fontSize: 20, cursor: "pointer", padding: "0 4px" }}>‹</button>
+            <div style={{ flex: 1, textAlign: "center" }}>
+              <div style={{ fontSize: 11, color: C.muted, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase" }}>Pay Week</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{fmtDate(mon)} – {fmtDate(sun)}</div>
+            </div>
+            <button onClick={() => shiftWeek(1)} style={{ background: "none", border: "none", color: C.dim, fontSize: 20, cursor: "pointer", padding: "0 4px" }}>›</button>
+            <div style={{ borderLeft: `1px solid ${C.border}`, paddingLeft: 14, textAlign: "center" }}>
+              <div style={{ fontSize: 20, fontWeight: 800, color: C.accent }}>{weekTrips.length}</div>
+              <div style={{ fontSize: 11, color: C.muted }}>trips</div>
+            </div>
           </div>
-          <button onClick={() => shiftWeek(1)} style={{ background: "none", border: "none", color: C.dim, fontSize: 20, cursor: "pointer", padding: "0 4px" }}>›</button>
-          <div style={{ borderLeft: `1px solid ${C.border}`, paddingLeft: 14, textAlign: "center" }}>
-            <div style={{ fontSize: 20, fontWeight: 800, color: C.accent }}>{weekTrips.length}</div>
-            <div style={{ fontSize: 11, color: C.muted }}>trips</div>
-          </div>
-        </div>
+        )}
 
         {/* Tabs */}
         <div style={{ display: "flex" }}>
-          {[["log", "📋 Trip Log"], ["payroll", "💰 Payroll"]].map(([k, l]) => (
+          {[["log", "📋 Trip Log"], ["payroll", "💰 Payroll"], ["drivers", "👤 Drivers"]].map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)} style={{
               flex: 1, background: "none", border: "none",
               borderBottom: `3px solid ${tab === k ? C.accent : "transparent"}`,
               color: tab === k ? C.accent : C.muted,
-              fontWeight: 700, fontSize: 14, padding: "10px 0", cursor: "pointer",
+              fontWeight: 700, fontSize: 13, padding: "10px 0", cursor: "pointer",
             }}>{l}</button>
           ))}
         </div>
@@ -741,7 +920,6 @@ function ManagerDashboard({ onLogout }) {
             </select>
           </div>
 
-          {/* Edit modal */}
           {editTrip && (
             <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 14, border: `2px solid ${C.accent}` }}>
               <div style={{ fontWeight: 700, color: C.accent, marginBottom: 14 }}>✏️ Edit Trip — {editTrip.driver}</div>
@@ -767,17 +945,13 @@ function ManagerDashboard({ onLogout }) {
             </div>
           )}
 
-          {filtered.length === 0 && (
-            <div style={{ textAlign: "center", color: C.muted, padding: "48px 0", fontSize: 15 }}>
-              No trips this week yet.
-            </div>
-          )}
+          {filtered.length === 0 && <div style={{ textAlign: "center", color: C.muted, padding: "48px 0", fontSize: 15 }}>No trips this week yet.</div>}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {[...filtered].sort((a, b) => new Date(b.startDateTime) - new Date(a.startDateTime)).map(t => {
-              const sc   = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
-              const over = isOvernight(t.startDateTime, t.endDateTime);
-              const isLocal = DRIVERS[t.driver]?.type === "local";
+              const sc      = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
+              const over    = isOvernight(t.startDateTime, t.endDateTime);
+              const isLocal = allDriversMap[t.driver]?.type === "local";
               return (
                 <div key={t.id} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
                   <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
@@ -827,111 +1001,65 @@ function ManagerDashboard({ onLogout }) {
           <div style={{ background: "#0a2218", border: "1px solid #14532d", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: "#4ade80" }}>
             ✅ Only <strong>Completed</strong> trips count toward pay.
           </div>
-
-          {payrollRows.length === 0 && (
-            <div style={{ textAlign: "center", color: C.muted, padding: "40px 0" }}>No trips logged this week.</div>
-          )}
+          {payrollRows.length === 0 && <div style={{ textAlign: "center", color: C.muted, padding: "40px 0" }}>No trips logged this week.</div>}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {payrollRows.map(row => (
               <div key={row.driver} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                {/* Driver header */}
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                   <span style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>{row.driver}</span>
-                  {row.pendingCount > 0 && (
-                    <span style={{ background: "#7f1d1d", color: "#fca5a5", borderRadius: 6, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>{row.pendingCount} pending</span>
-                  )}
+                  {row.pendingCount > 0 && <span style={{ background: "#7f1d1d", color: "#fca5a5", borderRadius: 6, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>{row.pendingCount} pending</span>}
                   <span style={{ fontSize: 11, color: C.muted, background: C.bg, borderRadius: 6, padding: "2px 8px" }}>
-                    {DRIVERS[row.driver]?.type === "local" ? "🏙️ Local" : "🛣️ Regional"}
+                    {row.dType === "local" ? "🏙️ Local" : "🛣️ Regional"}
                   </span>
                 </div>
 
-                {/* Rate row */}
                 <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.bg, borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
                   <span style={{ fontSize: 12, color: C.muted, fontWeight: 600 }}>BASE RATE</span>
                   {editingRate === row.driver ? (
                     <>
-                      <input
-                        type="number"
-                        value={editRateVal}
-                        onChange={e => setEditRateVal(e.target.value)}
-                        style={{ ...inp, width: 90, padding: "4px 8px", fontSize: 13 }}
-                        autoFocus
-                      />
+                      <input type="number" value={editRateVal} onChange={e => setEditRateVal(e.target.value)}
+                        style={{ ...inp, width: 90, padding: "4px 8px", fontSize: 13 }} autoFocus />
                       <button onClick={() => saveRate(row.driver)}
-                        style={{ background: C.accent, border: "none", borderRadius: 6, color: "#fff", padding: "4px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                        Save
-                      </button>
+                        style={{ background: C.accent, border: "none", borderRadius: 6, color: "#fff", padding: "4px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Save</button>
                       <button onClick={() => setEditingRate(null)}
-                        style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, color: C.muted, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>
-                        Cancel
-                      </button>
+                        style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, color: C.muted, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
                     </>
                   ) : (
                     <>
                       <span style={{ fontWeight: 700, color: "#4ade80", fontSize: 14 }}>${row.rate}</span>
-                      <button
-                        onClick={() => { setEditingRate(row.driver); setEditRateVal(String(row.rate)); }}
-                        style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 6, color: C.muted, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>
-                        Edit
-                      </button>
+                      <button onClick={() => { setEditingRate(row.driver); setEditRateVal(String(row.rate)); }}
+                        style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 6, color: C.muted, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>Edit</button>
                     </>
                   )}
                 </div>
 
-                {/* Trip breakdown */}
-                {row.tripItems.length === 0 ? (
-                  <div style={{ color: C.muted, fontSize: 12, fontStyle: "italic" }}>No completed trips this week.</div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {row.tripItems.map(({ trip: t, pay }) => (
-                      <div key={t.id} style={{ background: C.bg, borderRadius: 8, padding: "10px 12px", fontSize: 12 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                          <span style={{ color: C.dim, fontWeight: 600 }}>
-                            {new Date(t.startDateTime).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
-                            {DRIVERS[t.driver]?.type === "regional" && (
-                              <span style={{ color: C.muted }}> · {t.isRoundTrip ? "↩ Round Trip" : "→ One Way"}</span>
-                            )}
-                            {DRIVERS[t.driver]?.type === "local" && <span style={{ color: C.muted }}> · 12-hr Shift</span>}
-                          </span>
-                          <span style={{ fontWeight: 800, color: C.text }}>${pay.total.toFixed(2)}</span>
-                        </div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 2, color: C.muted }}>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span>Base pay</span><span>${pay.base.toFixed(2)}</span>
+                {row.tripItems.length === 0
+                  ? <div style={{ color: C.muted, fontSize: 12, fontStyle: "italic" }}>No completed trips this week.</div>
+                  : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {row.tripItems.map(({ trip: t, pay }) => (
+                        <div key={t.id} style={{ background: C.bg, borderRadius: 8, padding: "10px 12px", fontSize: 12 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                            <span style={{ color: C.dim, fontWeight: 600 }}>
+                              {new Date(t.startDateTime).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                              {row.dType === "regional" && <span style={{ color: C.muted }}> · {t.isRoundTrip ? "↩ Round Trip" : "→ One Way"}</span>}
+                              {row.dType === "local"    && <span style={{ color: C.muted }}> · 12-hr Shift</span>}
+                            </span>
+                            <span style={{ fontWeight: 800, color: C.text }}>${pay.total.toFixed(2)}</span>
                           </div>
-                          {pay.liveLoad > 0 && (
-                            <div style={{ display: "flex", justifyContent: "space-between", color: "#fb923c" }}>
-                              <span>+ Live Load bonus</span><span>+${pay.liveLoad.toFixed(2)}</span>
-                            </div>
-                          )}
-                          {pay.liveUnload > 0 && (
-                            <div style={{ display: "flex", justifyContent: "space-between", color: "#fb923c" }}>
-                              <span>+ Live Unload bonus</span><span>+${pay.liveUnload.toFixed(2)}</span>
-                            </div>
-                          )}
-                          {pay.breakdown > 0 && (
-                            <div style={{ display: "flex", justifyContent: "space-between", color: "#a78bfa" }}>
-                              <span>+ Breakdown ({t.breakdownHours} hr)</span><span>+${pay.breakdown.toFixed(2)}</span>
-                            </div>
-                          )}
-                          {pay.btt > 0 && (
-                            <div style={{ display: "flex", justifyContent: "space-between", color: "#a78bfa" }}>
-                              <span>+ Back to Terminal</span><span>+${pay.btt.toFixed(2)}</span>
-                            </div>
-                          )}
-                          {pay.detention > 0 && (
-                            <div style={{ display: "flex", justifyContent: "space-between", color: "#a78bfa" }}>
-                              <span>+ Detention ({t.detentionHours} hr)</span><span>+${pay.detention.toFixed(2)}</span>
-                            </div>
-                          )}
+                          <div style={{ display: "flex", flexDirection: "column", gap: 2, color: C.muted }}>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span>Base pay</span><span>${pay.base.toFixed(2)}</span></div>
+                            {pay.liveLoad > 0   && <div style={{ display: "flex", justifyContent: "space-between", color: "#fb923c" }}><span>+ Live Load bonus</span><span>+${pay.liveLoad.toFixed(2)}</span></div>}
+                            {pay.liveUnload > 0 && <div style={{ display: "flex", justifyContent: "space-between", color: "#fb923c" }}><span>+ Live Unload bonus</span><span>+${pay.liveUnload.toFixed(2)}</span></div>}
+                            {pay.breakdown > 0  && <div style={{ display: "flex", justifyContent: "space-between", color: "#a78bfa" }}><span>+ Breakdown ({t.breakdownHours} hr)</span><span>+${pay.breakdown.toFixed(2)}</span></div>}
+                            {pay.btt > 0        && <div style={{ display: "flex", justifyContent: "space-between", color: "#a78bfa" }}><span>+ Back to Terminal</span><span>+${pay.btt.toFixed(2)}</span></div>}
+                            {pay.detention > 0  && <div style={{ display: "flex", justifyContent: "space-between", color: "#a78bfa" }}><span>+ Detention ({t.detentionHours} hr)</span><span>+${pay.detention.toFixed(2)}</span></div>}
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                      ))}
+                    </div>
+                }
 
-                {/* Driver week total */}
                 <div style={{ marginTop: 10, borderTop: `1px solid ${C.border}`, paddingTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 13, fontWeight: 700, color: C.dim }}>Week Total</span>
                   <span style={{ fontSize: 18, fontWeight: 800, color: "#4ade80" }}>${row.weekTotal.toFixed(2)}</span>
@@ -940,12 +1068,9 @@ function ManagerDashboard({ onLogout }) {
             ))}
           </div>
 
-          {/* Fleet total */}
           {payrollRows.length > 0 && (
             <div style={{ background: "#0f2236", border: `1px solid ${C.blue}33`, borderRadius: 12, padding: "16px 18px", marginTop: 14 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <div style={{ fontWeight: 700, color: "#93c5fd", fontSize: 15 }}>🚛 Fleet Total — {fmtDate(mon)} to {fmtDate(sun)}</div>
-              </div>
+              <div style={{ fontWeight: 700, color: "#93c5fd", fontSize: 15, marginBottom: 10 }}>🚛 Fleet Total — {fmtDate(mon)} to {fmtDate(sun)}</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
                 {[
                   { v: weekTrips.length,                                       l: "Total Logged" },
@@ -965,6 +1090,110 @@ function ManagerDashboard({ onLogout }) {
             </div>
           )}
         </>}
+
+        {/* ── DRIVERS ── */}
+        {tab === "drivers" && <>
+          {/* Add New Driver */}
+          {!addingDriver ? (
+            <button onClick={() => setAddingDriver(true)} style={{ ...btn(), marginBottom: 16 }}>
+              + Add New Driver
+            </button>
+          ) : (
+            <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 16, border: `2px solid ${C.accent}` }}>
+              <div style={{ fontWeight: 700, color: C.accent, marginBottom: 16 }}>+ New Driver</div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Driver Name</label>
+                <input type="text" value={newDriver.name} onChange={e => setNewDriver(d => ({ ...d, name: e.target.value }))}
+                  placeholder="Full name" style={inp} autoFocus />
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Driver Type</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {["regional", "local"].map(t => (
+                    <button key={t} onClick={() => setNewDriver(d => ({ ...d, type: t }))}
+                      style={{ border: `2px solid ${newDriver.type === t ? C.accent : C.border}`, borderRadius: 10, padding: "10px", background: newDriver.type === t ? "#2a1a0e" : C.bg, color: newDriver.type === t ? C.accent : C.dim, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                      {t === "regional" ? "🛣️ Regional" : "🏙️ Local"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Base Rate ($)</label>
+                <input type="number" value={newDriver.rate} onChange={e => setNewDriver(d => ({ ...d, rate: e.target.value }))}
+                  min="0" style={inp} />
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={lbl}>Set PIN (4 digits)</label>
+                <input type="text" value={newDriver.pin} onChange={e => setNewDriver(d => ({ ...d, pin: e.target.value.replace(/\D/g, "").slice(0, 4) }))}
+                  placeholder="e.g. 1234" style={inp} inputMode="numeric" maxLength={4} />
+              </div>
+              {newDriverErr && <div style={{ color: "#fca5a5", fontSize: 13, marginBottom: 10 }}>{newDriverErr}</div>}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={saveNewDriver} disabled={savingNewDriver} style={{ ...btn(), flex: 1, opacity: savingNewDriver ? 0.6 : 1 }}>
+                  {savingNewDriver ? "Saving…" : "Save Driver"}
+                </button>
+                <button onClick={() => { setAddingDriver(false); setNewDriver({ name: "", type: "regional", rate: 255, pin: "" }); setNewDriverErr(""); }}
+                  style={{ ...btn("secondary"), flex: "0 0 90px" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {/* Driver list */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {allDriverList.map(name => {
+              const d       = allDriversMap[name];
+              const hasPin  = driverPins[name] === true;
+              const isEditing = settingPinFor === name;
+              return (
+                <div key={name} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 18 }}>{hasPin ? "✅" : "🔒"}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{name}</div>
+                      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+                        <span style={{ background: d?.type === "local" ? "#0f1f10" : "#0f2236", color: d?.type === "local" ? "#86efac" : "#93c5fd", borderRadius: 4, padding: "1px 7px", marginRight: 6 }}>
+                          {d?.type === "local" ? "🏙️ Local" : "🛣️ Regional"}
+                        </span>
+                        <span style={{ color: "#4ade80" }}>${d?.rate ?? "—"}/trip</span>
+                        {!hasPin && <span style={{ color: "#f59e0b", marginLeft: 8 }}>No PIN set</span>}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => { setSettingPinFor(isEditing ? null : name); setNewPinVal(""); }}
+                      style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 7, padding: "5px 12px", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap" }}>
+                      {isEditing ? "Cancel" : (hasPin ? "Change PIN" : "Set PIN")}
+                    </button>
+                  </div>
+
+                  {isEditing && (
+                    <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+                      <label style={lbl}>New PIN (4 digits)</label>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input
+                          type="text"
+                          value={newPinVal}
+                          onChange={e => setNewPinVal(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                          placeholder="e.g. 1234"
+                          style={{ ...inp, flex: 1 }}
+                          inputMode="numeric"
+                          maxLength={4}
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => savePin(name)}
+                          disabled={newPinVal.length !== 4 || pinSaving}
+                          style={{ background: C.accent, border: "none", borderRadius: 10, color: "#fff", padding: "12px 18px", fontWeight: 700, fontSize: 14, cursor: "pointer", opacity: newPinVal.length !== 4 ? 0.4 : 1, whiteSpace: "nowrap" }}>
+                          {pinSaving ? "…" : "Save"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>}
+
       </div>
     </div>
   );
@@ -973,13 +1202,11 @@ function ManagerDashboard({ onLogout }) {
 // ── MANAGER PAGE (login gate) ──────────────────────────────────────────────────
 function ManagerPage() {
   const [authed, setAuthed] = useState(() => sessionStorage.getItem("managerAuth") === "true");
-
   if (!authed) return (
     <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 480, margin: "0 auto" }}>
       <ManagerLogin onLogin={() => setAuthed(true)} />
     </div>
   );
-
   return (
     <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 860, margin: "0 auto" }}>
       <ManagerDashboard onLogout={() => setAuthed(false)} />
@@ -989,9 +1216,27 @@ function ManagerPage() {
 
 // ── DRIVER PAGE ────────────────────────────────────────────────────────────────
 function DriverPage() {
+  const [session, setSession] = useState(() => {
+    const s = sessionStorage.getItem("driverSession");
+    try { return s ? JSON.parse(s) : null; } catch { return null; }
+  });
+
+  function handleLogin() {
+    const s = sessionStorage.getItem("driverSession");
+    try { setSession(s ? JSON.parse(s) : null); } catch { setSession(null); }
+  }
+
+  function handleLogout() {
+    sessionStorage.removeItem("driverSession");
+    setSession(null);
+  }
+
   return (
     <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 480, margin: "0 auto" }}>
-      <DriverForm />
+      {session
+        ? <DriverForm session={session} onLogout={handleLogout} />
+        : <DriverLoginScreen onLogin={handleLogin} />
+      }
     </div>
   );
 }
