@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 import { supabase } from "./supabaseClient";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -1360,6 +1361,7 @@ export default function App() {
         <Route path="/manager" element={<ManagerPage />} />
         <Route path="*"        element={<Navigate to="/driver" replace />} />
       </Routes>
+      <SpeedInsights />
     </BrowserRouter>
   );
 }
