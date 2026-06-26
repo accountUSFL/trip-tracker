@@ -145,6 +145,7 @@ function tripFromDb(row) {
     hoursOnDuty:       row.hours_on_duty || 0,
     truckNumber:       row.truck_number || "",
     trailerNumber:     row.trailer_number || "",
+    trailer2Number:    row.trailer_number_2 || "",
     oilStatus:         row.oil_status || "",
     coolantStatus:     row.coolant_status || "",
     hasStraps:         row.has_straps || false,
@@ -220,7 +221,7 @@ function DriverLogin({ onLogin }) {
     const { data } = await supabase.from("driver_pins").select("pin").eq("driver_name", driverName).single();
     if (data && data.pin === entered) {
       const info = { name: driverName, rate: driverInfo.rate, driverType: driverInfo.driver_type };
-      sessionStorage.setItem("driverAuth", JSON.stringify(info));
+      localStorage.setItem("driverAuth", JSON.stringify(info));
       onLogin(info);
     } else { setError("Wrong PIN. Try again."); setPin(""); }
   }
@@ -239,7 +240,7 @@ function DriverLogin({ onLogin }) {
     if (p1 !== p2) { setError("PINs don't match."); setNewPin(""); setConfirmPin(""); setPinStep("enter"); return; }
     await supabase.from("driver_pins").upsert({ driver_name: driverName, pin: p1, updated_at: new Date().toISOString() });
     const info = { name: driverName, rate: driverInfo.rate, driverType: driverInfo.driver_type };
-    sessionStorage.setItem("driverAuth", JSON.stringify(info));
+    localStorage.setItem("driverAuth", JSON.stringify(info));
     onLogin(info);
   }
 
@@ -298,23 +299,11 @@ function DriverLogin({ onLogin }) {
 
 // ── PRE-TRIP FORM ─────────────────────────────────────────────────────────────
 function PreTripForm({ driver, onNext, onLogout }) {
-  const [vehicles, setVehicles] = useState([]);
-  const [loadingVehicles, setLoadingVehicles] = useState(true);
   const [form, setForm] = useState({
     truckNumber: "", trailerNumber: "",
     oilStatus: "", coolantStatus: "",
     hasStraps: null, preTripComment: "",
   });
-
-  useEffect(() => {
-    fetch("/api/motive-vehicles")
-      .then(r => r.json())
-      .then(data => {
-        if (data.vehicles) setVehicles(data.vehicles);
-        setLoadingVehicles(false);
-      })
-      .catch(() => setLoadingVehicles(false));
-  }, []);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
@@ -347,15 +336,11 @@ function PreTripForm({ driver, onNext, onLogout }) {
 
       <div style={{ flex: 1, padding: "24px 20px", display: "flex", flexDirection: "column", gap: 20 }}>
 
-        {/* Truck select */}
+        {/* Truck # manual entry */}
         <div>
-          <label style={lbl}>Truck # {loadingVehicles ? "(loading…)" : ""}</label>
-          <select value={form.truckNumber} onChange={e => set("truckNumber", e.target.value)} style={{ ...inp, fontSize: 15 }}>
-            <option value="">Select truck…</option>
-            {vehicles.map(v => (
-              <option key={v.id} value={v.number}>{v.number}{v.year ? ` — ${v.year}` : ""}{v.make ? ` ${v.make}` : ""}</option>
-            ))}
-          </select>
+          <label style={lbl}>Truck #</label>
+          <input type="text" value={form.truckNumber} onChange={e => set("truckNumber", e.target.value)}
+            placeholder="e.g. IDEAL 237669" style={inp} autoCapitalize="characters" />
         </div>
 
         {/* Trailer */}
@@ -470,7 +455,7 @@ function ClockInSetup({ driver, preTripData, onClockIn, onBack }) {
         <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>Where are you starting?</div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          {[{ label: "🌴 From Cali", city: "Cali" }, { label: "🎰 From Vegas", city: "Vegas" }].map(o => (
+          {[{ label: "🎰 From Vegas", city: "Vegas" }, { label: "🌴 From Cali", city: "Cali" }].map(o => (
             <button key={o.city} onClick={() => { set("originCity", o.city); set("trip1LoadType", ""); }}
               style={selBtn(form.originCity === o.city)}>{o.label}</button>
           ))}
@@ -525,37 +510,48 @@ function ClockInSetup({ driver, preTripData, onClockIn, onBack }) {
 function DrivingScreen({ driver, trip, onClockOut, onLogout }) {
   const [elapsed, setElapsed] = useState(0);
   const [showClockOut, setShowClockOut] = useState(false);
+  const [tripDone, setTripDone] = useState(false);
   const [trip2LoadType, setTrip2LoadType] = useState("");
+  const [trailer2Number, setTrailer2Number] = useState("");
   const [notes, setNotes] = useState("");
   const [clocking, setClocking] = useState(false);
-  const locationIntervalRef = useRef(null);
+  const watchIdRef = useRef(null);
 
   useEffect(() => {
     const start = new Date(trip.startDateTime);
     const timer = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
 
-    // Location tracking
+    // Continuous GPS tracking via watchPosition
     if (navigator.geolocation) {
-      const saveLocation = () => {
-        navigator.geolocation.getCurrentPosition(async pos => {
+      let lastSavedAt = 0;
+      const MIN_MS = 30 * 1000; // save at most every 30 seconds
+
+      watchIdRef.current = navigator.geolocation.watchPosition(
+        async pos => {
+          const now = Date.now();
+          if (now - lastSavedAt < MIN_MS) return;
+          lastSavedAt = now;
           await supabase.from("driver_locations").insert({
             trip_id: trip.id, driver_name: driver.name,
             latitude: pos.coords.latitude, longitude: pos.coords.longitude,
+            recorded_at: new Date().toISOString(),
           });
-        }, () => {});
-      };
-      saveLocation();
-      locationIntervalRef.current = setInterval(saveLocation, 5 * 60 * 1000);
+        },
+        err => console.warn("GPS:", err.message),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+      );
     }
 
     return () => {
       clearInterval(timer);
-      clearInterval(locationIntervalRef.current);
+      if (watchIdRef.current != null) navigator.geolocation.clearWatch(watchIdRef.current);
     };
   }, []);
 
   async function handleClockOut() {
     if (trip.tripType === "round_trip" && !trip2LoadType) return;
+    // Stop GPS watch
+    if (watchIdRef.current != null) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
     setClocking(true);
 
     // Save final location
@@ -564,6 +560,7 @@ function DrivingScreen({ driver, trip, onClockOut, onLogout }) {
         await supabase.from("driver_locations").insert({
           trip_id: trip.id, driver_name: driver.name,
           latitude: pos.coords.latitude, longitude: pos.coords.longitude,
+          recorded_at: new Date().toISOString(),
         });
       }, () => {});
     }
@@ -571,19 +568,45 @@ function DrivingScreen({ driver, trip, onClockOut, onLogout }) {
     clearInterval(locationIntervalRef.current);
 
     await supabase.from("trips").update({
-      end_date_time:   new Date().toISOString(),
-      status:          "Completed",
-      trip2_load_type: trip2LoadType || null,
-      notes:           notes || "",
+      end_date_time:    new Date().toISOString(),
+      status:           "Completed",
+      trip2_load_type:  trip2LoadType || null,
+      trailer_number_2: trailer2Number || null,
+      notes:            notes || "",
     }).eq("id", trip.id);
 
     setClocking(false);
-    onClockOut();
+    setTripDone(true);
   }
 
   const isRT = trip.tripType === "round_trip";
   const h = Math.floor(elapsed / 3600);
   const bgPulse = elapsed > 0 && elapsed % 2 === 0;
+
+  // ── Trip Done screen ──────────────────────────────────────────────────────
+  if (tripDone) {
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ background: C.card, borderRadius: 20, padding: 36, maxWidth: 380, width: "100%", textAlign: "center", border: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: 56, marginBottom: 12 }}>✅</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: C.text, marginBottom: 8 }}>Trip Submitted!</div>
+          <div style={{ color: C.muted, fontSize: 14, marginBottom: 32 }}>
+            Great work, {driver.name}. What would you like to do next?
+          </div>
+          <button
+            onClick={onClockOut}
+            style={{ ...btn(), width: "100%", fontSize: 16, padding: "16px", marginBottom: 14 }}>
+            🚛 Log Another Trip
+          </button>
+          <button
+            onClick={onLogout}
+            style={{ ...btn("danger"), width: "100%", fontSize: 16, padding: "16px" }}>
+            🚪 Sign Out
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column" }}>
@@ -646,23 +669,30 @@ function DrivingScreen({ driver, trip, onClockOut, onLogout }) {
             <div style={{ fontWeight: 700, color: "#fca5a5", marginBottom: 16, fontSize: 16 }}>Confirm Clock Out</div>
 
             {isRT && (
-              <div style={{ marginBottom: 16 }}>
-                <label style={lbl}>Return Load (Leg 2) *</label>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {[
-                    { v: "Live Unload", l: "🔴 Live Unload", d: "Waited at dock while unloaded" },
-                    { v: "Drop",        l: "🟡 Drop",        d: "Dropped trailer and left" },
-                  ].map(o => (
-                    <button key={o.v} onClick={() => setTrip2LoadType(o.v)}
-                      style={{ border: `2px solid ${trip2LoadType === o.v ? C.blue : C.border}`, borderRadius: 10,
-                        padding: "11px 14px", background: trip2LoadType === o.v ? "#0f2236" : C.bg,
-                        color: trip2LoadType === o.v ? "#60a5fa" : C.dim, fontWeight: 600, fontSize: 14, cursor: "pointer", textAlign: "left" }}>
-                      <div>{o.l}</div>
-                      <div style={{ fontSize: 12, fontWeight: 400, marginTop: 2, opacity: 0.75 }}>{o.d}</div>
-                    </button>
-                  ))}
+              <>
+                <div style={{ marginBottom: 16 }}>
+                  <label style={lbl}>Return Trailer # (Leg 2) *</label>
+                  <input type="text" value={trailer2Number} onChange={e => setTrailer2Number(e.target.value)}
+                    placeholder="e.g. TRL-9042" style={inp} />
                 </div>
-              </div>
+                <div style={{ marginBottom: 16 }}>
+                  <label style={lbl}>Return Load Type (Leg 2) *</label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      { v: "Live Unload", l: "🔴 Live Unload", d: "Waited at dock while unloaded" },
+                      { v: "Drop",        l: "🟡 Drop",        d: "Dropped trailer and left" },
+                    ].map(o => (
+                      <button key={o.v} onClick={() => setTrip2LoadType(o.v)}
+                        style={{ border: `2px solid ${trip2LoadType === o.v ? C.blue : C.border}`, borderRadius: 10,
+                          padding: "11px 14px", background: trip2LoadType === o.v ? "#0f2236" : C.bg,
+                          color: trip2LoadType === o.v ? "#60a5fa" : C.dim, fontWeight: 600, fontSize: 14, cursor: "pointer", textAlign: "left" }}>
+                        <div>{o.l}</div>
+                        <div style={{ fontSize: 12, fontWeight: 400, marginTop: 2, opacity: 0.75 }}>{o.d}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
             )}
 
             <div style={{ marginBottom: 16 }}>
@@ -673,11 +703,11 @@ function DrivingScreen({ driver, trip, onClockOut, onLogout }) {
 
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={handleClockOut}
-                disabled={clocking || (isRT && !trip2LoadType)}
-                style={{ ...btn("danger"), flex: 1, opacity: (clocking || (isRT && !trip2LoadType)) ? 0.5 : 1 }}>
+                disabled={clocking || (isRT && (!trip2LoadType || !trailer2Number))}
+                style={{ ...btn("danger"), flex: 1, opacity: (clocking || (isRT && (!trip2LoadType || !trailer2Number))) ? 0.5 : 1 }}>
                 {clocking ? "Saving…" : "Confirm Clock Out"}
               </button>
-              <button onClick={() => { setShowClockOut(false); setTrip2LoadType(""); setNotes(""); }}
+              <button onClick={() => { setShowClockOut(false); setTrip2LoadType(""); setTrailer2Number(""); setNotes(""); }}
                 style={{ ...btn("secondary"), flex: "0 0 80px" }}>Cancel</button>
             </div>
           </div>
@@ -687,26 +717,40 @@ function DrivingScreen({ driver, trip, onClockOut, onLogout }) {
   );
 }
 
-// ── TRIP MAP (Leaflet) ────────────────────────────────────────────────────────
-function TripMap({ activeTrips, locations }) {
-  const mapRef = useRef(null);
-  const instanceRef = useRef(null);
+const MAP_COLORS = ["#f97316","#3b82f6","#22c55e","#a855f7","#ec4899","#eab308"];
 
+// ── LIVE TRIP MAP (no-flicker, layer-based) ───────────────────────────────────
+function TripMap({ activeTrips, locations }) {
+  const mapRef     = useRef(null);
+  const instanceRef = useRef(null);
+  const layersRef  = useRef({}); // trip.id → [L.layer, ...]
+
+  // Init map once
   useEffect(() => {
     const L = window.L;
-    if (!L || !mapRef.current) return;
-
-    if (instanceRef.current) { instanceRef.current.remove(); instanceRef.current = null; }
-
+    if (!L || !mapRef.current || instanceRef.current) return;
     const map = L.map(mapRef.current, { zoomControl: true }).setView([35.5, -116.0], 7);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap", maxZoom: 18 }).addTo(map);
     instanceRef.current = map;
+    return () => { map.remove(); instanceRef.current = null; };
+  }, []);
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "© OpenStreetMap",
-      maxZoom: 18,
-    }).addTo(map);
+  // Update layers whenever data changes (no full map rebuild)
+  useEffect(() => {
+    const L = window.L;
+    const map = instanceRef.current;
+    if (!L || !map) return;
 
-    const colors = ["#f97316","#3b82f6","#22c55e","#a855f7","#ec4899","#eab308"];
+    // Remove layers for trips no longer active
+    const activeIds = new Set(activeTrips.map(t => t.id));
+    Object.keys(layersRef.current).forEach(id => {
+      if (!activeIds.has(id)) {
+        layersRef.current[id].forEach(l => map.removeLayer(l));
+        delete layersRef.current[id];
+      }
+    });
+
+    const allCoords = [];
 
     activeTrips.forEach((trip, idx) => {
       const tripLocs = locations
@@ -715,41 +759,123 @@ function TripMap({ activeTrips, locations }) {
 
       if (tripLocs.length === 0) return;
 
-      const color = colors[idx % colors.length];
+      const color  = MAP_COLORS[idx % MAP_COLORS.length];
       const coords = tripLocs.map(l => [parseFloat(l.latitude), parseFloat(l.longitude)]);
+      allCoords.push(...coords);
 
-      // Route line
-      if (coords.length > 1) {
-        L.polyline(coords, { color, weight: 4, opacity: 0.85 }).addTo(map);
+      // Remove old layers for this trip before redrawing
+      if (layersRef.current[trip.id]) {
+        layersRef.current[trip.id].forEach(l => map.removeLayer(l));
       }
 
-      // Start marker
-      L.circleMarker(coords[0], { radius: 8, fillColor: "#fff", color, weight: 3, fillOpacity: 1 })
-        .addTo(map)
-        .bindPopup(`🟢 Start — ${trip.driver}`);
+      const layers = [];
 
-      // Current position
+      // Route line (grows with each new ping)
+      if (coords.length > 1) {
+        layers.push(L.polyline(coords, { color, weight: 5, opacity: 0.9 }).addTo(map));
+      }
+
+      // Start dot (white)
+      layers.push(
+        L.circleMarker(coords[0], { radius: 7, fillColor: "#fff", color, weight: 3, fillOpacity: 1 })
+          .addTo(map).bindPopup(`🟢 Start — ${trip.driver}`)
+      );
+
+      // Current position (pulsing truck)
       const last = coords[coords.length - 1];
-      L.circleMarker(last, { radius: 10, fillColor: color, color: "#fff", weight: 3, fillOpacity: 1 })
-        .addTo(map)
-        .bindPopup(`🚛 ${trip.driver}<br>${trip.truckNumber || ""}<br>${formatElapsed(Math.floor((Date.now() - new Date(trip.startDateTime)) / 1000))} on duty`)
-        .openPopup();
+      const popup = `<b>🚛 ${trip.driver}</b><br>${trip.truckNumber || ""}${trip.truckNumber ? "<br>" : ""}⏱ ${formatElapsed(Math.floor((Date.now() - new Date(trip.startDateTime)) / 1000))} on duty`;
+      layers.push(
+        L.circleMarker(last, { radius: 11, fillColor: color, color: "#fff", weight: 3, fillOpacity: 1 })
+          .addTo(map).bindPopup(popup).openPopup()
+      );
+
+      layersRef.current[trip.id] = layers;
     });
 
-    if (activeTrips.length === 0) {
-      L.popup().setLatLng([35.5, -116.0]).setContent("No drivers currently on the road.").openOn(map);
+    // Fit map to all visible points
+    if (allCoords.length > 0) {
+      map.fitBounds(allCoords, { padding: [40, 40], maxZoom: 13 });
+    } else if (activeTrips.length > 0) {
+      map.setView([35.5, -116.0], 7);
     }
-
-    return () => { if (instanceRef.current) { instanceRef.current.remove(); instanceRef.current = null; } };
   }, [activeTrips, locations]);
 
   return (
     <div>
-      <div ref={mapRef} style={{ height: 420, borderRadius: 12, overflow: "hidden", border: `1px solid ${C.border}` }} />
-      {!window.L && (
-        <div style={{ textAlign: "center", color: C.muted, fontSize: 13, marginTop: 8 }}>
-          Map requires Leaflet — add to public/index.html (see instructions)
+      <div ref={mapRef} style={{ height: 440, borderRadius: 14, overflow: "hidden", border: `1px solid ${C.border}` }} />
+      {!window.L && <div style={{ textAlign: "center", color: C.muted, fontSize: 13, marginTop: 8 }}>Map unavailable — Leaflet not loaded.</div>}
+    </div>
+  );
+}
+
+// ── COMPLETED TRIP ROUTE MAP ──────────────────────────────────────────────────
+function TripRouteMap({ trip, onClose }) {
+  const [locs, setLocs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const mapRef      = useRef(null);
+  const instanceRef = useRef(null);
+
+  useEffect(() => {
+    supabase.from("driver_locations")
+      .select("*").eq("trip_id", trip.id)
+      .order("recorded_at", { ascending: true })
+      .then(({ data }) => { setLocs(data || []); setLoading(false); });
+  }, [trip.id]);
+
+  useEffect(() => {
+    const L = window.L;
+    if (!L || !mapRef.current || loading) return;
+    if (instanceRef.current) { instanceRef.current.remove(); instanceRef.current = null; }
+
+    const map = L.map(mapRef.current, { zoomControl: true }).setView([35.5, -116.0], 7);
+    instanceRef.current = map;
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap", maxZoom: 18 }).addTo(map);
+
+    if (locs.length === 0) {
+      L.popup().setLatLng([35.5, -116.0]).setContent("No GPS data recorded for this trip.").openOn(map);
+      return;
+    }
+
+    const coords = locs.map(l => [parseFloat(l.latitude), parseFloat(l.longitude)]);
+    const color  = "#f97316";
+
+    // Full route line
+    if (coords.length > 1) L.polyline(coords, { color, weight: 5, opacity: 0.9, dashArray: null }).addTo(map);
+
+    // Start marker
+    L.circleMarker(coords[0], { radius: 9, fillColor: "#22c55e", color: "#fff", weight: 3, fillOpacity: 1 })
+      .addTo(map).bindPopup(`🟢 Trip Start<br>${new Date(trip.startDateTime).toLocaleString()}`).openPopup();
+
+    // End marker
+    const last = coords[coords.length - 1];
+    L.circleMarker(last, { radius: 9, fillColor: "#ef4444", color: "#fff", weight: 3, fillOpacity: 1 })
+      .addTo(map).bindPopup(`🏁 Trip End<br>${trip.endDateTime ? new Date(trip.endDateTime).toLocaleString() : "—"}`);
+
+    // Intermediate pings
+    coords.slice(1, -1).forEach(c => {
+      L.circleMarker(c, { radius: 4, fillColor: color, color, weight: 1, fillOpacity: 0.6 }).addTo(map);
+    });
+
+    map.fitBounds(coords, { padding: [40, 40], maxZoom: 13 });
+
+    return () => { if (instanceRef.current) { instanceRef.current.remove(); instanceRef.current = null; } };
+  }, [locs, loading]);
+
+  return (
+    <div style={{ background: C.card, borderRadius: 16, border: `2px solid ${C.accent}`, overflow: "hidden", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderBottom: `1px solid ${C.border}` }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>📍 Route — {trip.driver}</div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+            {locs.length} GPS pings · {fmt(trip.startDateTime)} → {trip.endDateTime ? fmt(trip.endDateTime) : "Active"}
+          </div>
         </div>
+        <button onClick={onClose} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, color: C.muted, width: 30, height: 30, cursor: "pointer", fontSize: 16 }}>×</button>
+      </div>
+      {loading ? (
+        <div style={{ height: 300, display: "flex", alignItems: "center", justifyContent: "center", color: C.muted }}>Loading route…</div>
+      ) : (
+        <div ref={mapRef} style={{ height: 340 }} />
       )}
     </div>
   );
@@ -766,7 +892,7 @@ function ManagerLogin({ onLogin }) {
   function handleSubmit(e) {
     e.preventDefault(); setLoading(true);
     setTimeout(() => {
-      if (password === MANAGER_PASSWORD) { sessionStorage.setItem("managerAuth", "true"); onLogin(); }
+      if (password === MANAGER_PASSWORD) { localStorage.setItem("managerAuth", "true"); onLogin(); }
       else { setError("Incorrect password."); setPassword(""); }
       setLoading(false);
     }, 400);
@@ -810,6 +936,7 @@ function ManagerDashboard({ onLogout }) {
   const [filterDriver, setFilterDriver] = useState("All");
   const [filterStatus, setFilterStatus] = useState("All");
   const [editTrip, setEditTrip]         = useState(null);
+  const [routeTrip, setRouteTrip]       = useState(null);
   const [editDriver, setEditDriver]     = useState(null);
   const [addDriverForm, setAddDriverForm] = useState(null);
   const [driverSaving, setDriverSaving]   = useState(false);
@@ -898,123 +1025,168 @@ function ManagerDashboard({ onLogout }) {
 
   const shiftWeek = n => { const d = new Date(mon); d.setDate(d.getDate() + n * 7); setWeekStart(d.toISOString().slice(0, 10)); };
 
+  const weekPayTotal = payroll.reduce((s, r) => s + r.total, 0);
+  const pendingCount = weekTrips.filter(t => t.status !== "Completed").length;
+
+  const Avatar = ({ name, size = 38 }) => {
+    const initials = name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
+    const colors = ["#f97316","#3b82f6","#22c55e","#a855f7","#ec4899","#eab308","#06b6d4","#f43f5e"];
+    const bg = colors[name.charCodeAt(0) % colors.length];
+    return (
+      <div style={{ width: size, height: size, borderRadius: "50%", background: bg, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: size * 0.36, color: "#fff", flexShrink: 0 }}>
+        {initials}
+      </div>
+    );
+  };
+
   if (loading) return (
     <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ color: C.muted }}>Loading…</div>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>🚛</div>
+        <div style={{ color: C.muted, fontSize: 14 }}>Loading dashboard…</div>
+      </div>
     </div>
   );
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Inter', sans-serif" }}>
-      {/* Header */}
-      <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "16px 20px 0" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-          <span style={{ fontSize: 22 }}>🚛</span>
+
+      {/* ── TOP HEADER ── */}
+      <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "14px 20px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 10, background: "linear-gradient(135deg,#f97316,#ea580c)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🚛</div>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 17 }}>USFL Manager</div>
-            <div style={{ fontSize: 12, color: C.muted }}>Cali ↔ Las Vegas Fleet</div>
+            <div style={{ fontWeight: 800, fontSize: 16, letterSpacing: "-0.01em" }}>USFL Manager</div>
+            <div style={{ fontSize: 11, color: C.muted }}>Cali ↔ Las Vegas Fleet</div>
           </div>
           {activeTrips.length > 0 && (
-            <div style={{ background: "#052e16", border: "1px solid #22c55e", borderRadius: 8, padding: "4px 12px", fontSize: 12, color: "#4ade80", fontWeight: 700 }}>
-              🟢 {activeTrips.length} on road
+            <div style={{ marginLeft: 8, background: "#052e16", border: "1px solid #22c55e55", borderRadius: 20, padding: "4px 12px", fontSize: 12, color: "#4ade80", fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", display: "inline-block", boxShadow: "0 0 6px #22c55e" }} />
+              {activeTrips.length} on road
             </div>
           )}
-          <button onClick={() => { sessionStorage.removeItem("managerAuth"); onLogout(); }}
-            style={{ marginLeft: "auto", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.muted, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+          <button onClick={() => { localStorage.removeItem("managerAuth"); onLogout(); }}
+            style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, color: C.muted, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
             Sign Out
           </button>
         </div>
-
-        {/* Week nav */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.card, borderRadius: 10, padding: "10px 14px", marginBottom: 14, border: `1px solid ${C.border}` }}>
-          <button onClick={() => shiftWeek(-1)} style={{ background: "none", border: "none", color: C.dim, fontSize: 20, cursor: "pointer" }}>‹</button>
-          <div style={{ flex: 1, textAlign: "center" }}>
-            <div style={{ fontSize: 11, color: C.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Pay Week</div>
-            <div style={{ fontSize: 14, fontWeight: 700 }}>{fmtDate(mon)} – {fmtDate(sun)}</div>
-          </div>
-          <button onClick={() => shiftWeek(1)} style={{ background: "none", border: "none", color: C.dim, fontSize: 20, cursor: "pointer" }}>›</button>
-          <div style={{ borderLeft: `1px solid ${C.border}`, paddingLeft: 14, textAlign: "center" }}>
-            <div style={{ fontSize: 20, fontWeight: 800, color: C.accent }}>{weekTrips.length}</div>
-            <div style={{ fontSize: 11, color: C.muted }}>trips</div>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div style={{ display: "flex" }}>
-          {[["live","🟢 Live"],["map","🗺 Map"],["log","📋 Log"],["payroll","💰 Payroll"],["drivers","👤 Drivers"]].map(([k,l]) => (
-            <button key={k} onClick={() => setTab(k)} style={{
-              flex: 1, background: "none", border: "none",
-              borderBottom: `3px solid ${tab === k ? C.accent : "transparent"}`,
-              color: tab === k ? C.accent : C.muted, fontWeight: 700, fontSize: 12, padding: "10px 0", cursor: "pointer",
-            }}>{l}</button>
-          ))}
-        </div>
       </div>
 
-      <div style={{ padding: "16px 20px" }}>
+      {/* ── STAT CARDS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, padding: "14px 20px 0" }}>
+        {[
+          { label: "On Road",    value: activeTrips.length,       color: "#22c55e", icon: "🟢" },
+          { label: "Week Trips", value: weekTrips.length,         color: C.accent,  icon: "📋" },
+          { label: "Week Pay",   value: `$${weekPayTotal.toFixed(0)}`, color: "#4ade80", icon: "💰" },
+          { label: "Pending",    value: pendingCount,             color: pendingCount > 0 ? "#f59e0b" : C.muted, icon: "⏳" },
+        ].map(s => (
+          <div key={s.label} style={{ background: C.card, borderRadius: 12, padding: "12px 10px", border: `1px solid ${C.border}`, textAlign: "center" }}>
+            <div style={{ fontSize: 18, marginBottom: 4 }}>{s.icon}</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value}</div>
+            <div style={{ fontSize: 10, color: C.muted, marginTop: 3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── WEEK NAV ── */}
+      <div style={{ display: "flex", alignItems: "center", margin: "12px 20px 0", background: C.card, borderRadius: 12, padding: "10px 14px", border: `1px solid ${C.border}` }}>
+        <button onClick={() => shiftWeek(-1)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, width: 32, height: 32, borderRadius: 8, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>‹</button>
+        <div style={{ flex: 1, textAlign: "center" }}>
+          <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2 }}>Pay Week</div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>{fmtDate(mon)} – {fmtDate(sun)}</div>
+        </div>
+        <button onClick={() => shiftWeek(1)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.text, width: 32, height: 32, borderRadius: 8, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>›</button>
+      </div>
+
+      {/* ── TABS ── */}
+      <div style={{ display: "flex", gap: 6, padding: "12px 20px 0", overflowX: "auto" }}>
+        {[["live","🟢","Live"],["map","🗺️","Map"],["log","📋","Log"],["payroll","💰","Payroll"],["drivers","👤","Drivers"]].map(([k, icon, label]) => (
+          <button key={k} onClick={() => setTab(k)} style={{
+            display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
+            background: tab === k ? C.accent : C.card,
+            border: `1px solid ${tab === k ? C.accent : C.border}`,
+            borderRadius: 20, color: tab === k ? "#fff" : C.muted,
+            fontWeight: 700, fontSize: 13, padding: "8px 16px", cursor: "pointer",
+            transition: "all 0.15s",
+          }}>
+            <span>{icon}</span> {label}
+            {k === "live" && activeTrips.length > 0 && (
+              <span style={{ background: tab === k ? "rgba(255,255,255,0.25)" : "#22c55e", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 800 }}>{activeTrips.length}</span>
+            )}
+            {k === "log" && pendingCount > 0 && (
+              <span style={{ background: tab === k ? "rgba(255,255,255,0.25)" : "#f59e0b", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 800 }}>{pendingCount}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: "16px 20px 32px" }}>
 
         {/* ── LIVE BOARD ── */}
         {tab === "live" && <>
-          <div style={{ fontWeight: 700, color: C.text, marginBottom: 14, fontSize: 16 }}>
-            🟢 Currently On The Road — {activeTrips.length} driver{activeTrips.length !== 1 ? "s" : ""}
-          </div>
-          {activeTrips.length === 0 && (
-            <div style={{ textAlign: "center", color: C.muted, padding: "60px 0", fontSize: 15 }}>
-              No drivers currently on the road.
+          {activeTrips.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "60px 20px" }}>
+              <div style={{ fontSize: 48, marginBottom: 12 }}>🛣️</div>
+              <div style={{ color: C.text, fontWeight: 700, fontSize: 16, marginBottom: 6 }}>All Quiet</div>
+              <div style={{ color: C.muted, fontSize: 14 }}>No drivers are currently on the road.</div>
             </div>
-          )}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {activeTrips.map(t => {
-              const elapsed = Math.floor((Date.now() - new Date(t.startDateTime)) / 1000);
-              const tripLocs = locations.filter(l => l.trip_id === t.id);
-              return (
-                <div key={t.id} style={{ background: C.card, borderRadius: 12, padding: 16, border: "1px solid #22c55e44" }}>
-                  <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                    <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 6px #22c55e", marginTop: 4, flexShrink: 0 }} />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 700, fontSize: 16, color: C.text }}>{t.driver}</div>
-                      <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
-                        {t.truckNumber && <span>🚛 {t.truckNumber} · </span>}
-                        {t.trailerNumber && <span>Trailer: {t.trailerNumber} · </span>}
-                        {t.originCity === "Cali" ? "🌴 From Cali" : "🎰 From Vegas"}
-                        {" · "}
-                        {t.tripType === "local" ? "Local" : t.tripType === "round_trip" ? "Round Trip" : "One Way"}
-                      </div>
-                      {t.trip1LoadType && <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>Leg 1: {t.trip1LoadType}</div>}
-                      <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{ background: "#052e16", color: "#4ade80", borderRadius: 6, padding: "3px 10px", fontSize: 12, fontWeight: 700, fontFamily: "monospace" }}>
-                          ⏱ {formatElapsed(elapsed)}
-                        </span>
-                        {t.oilStatus && <span style={{ background: C.bg, color: C.muted, borderRadius: 6, padding: "3px 10px", fontSize: 12 }}>Oil: {t.oilStatus}</span>}
-                        {t.hasStraps && <span style={{ background: C.bg, color: "#4ade80", borderRadius: 6, padding: "3px 10px", fontSize: 12 }}>✅ Straps</span>}
-                        {tripLocs.length > 0 && <span style={{ background: C.bg, color: C.blue, borderRadius: 6, padding: "3px 10px", fontSize: 12 }}>📍 {tripLocs.length} location{tripLocs.length !== 1 ? "s" : ""}</span>}
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {activeTrips.map(t => {
+                const elapsed = Math.floor((Date.now() - new Date(t.startDateTime)) / 1000);
+                const tripLocs = locations.filter(l => l.trip_id === t.id);
+                return (
+                  <div key={t.id} style={{ background: C.card, borderRadius: 16, padding: 18, border: "1px solid #22c55e33", position: "relative", overflow: "hidden" }}>
+                    <div style={{ position: "absolute", top: 0, left: 0, width: 4, height: "100%", background: "#22c55e", borderRadius: "4px 0 0 4px" }} />
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 14, paddingLeft: 8 }}>
+                      <Avatar name={t.driver} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                          <span style={{ fontWeight: 800, fontSize: 16 }}>{t.driver}</span>
+                          <span style={{ background: "#052e16", color: "#4ade80", borderRadius: 6, padding: "3px 10px", fontSize: 12, fontWeight: 700, fontFamily: "monospace" }}>⏱ {formatElapsed(elapsed)}</span>
+                        </div>
+                        <div style={{ fontSize: 13, color: C.muted, marginBottom: 8 }}>
+                          {t.originCity === "Cali" ? "🌴 From Cali" : "🎰 From Vegas"} ·{" "}
+                          {t.tripType === "local" ? "Local Shift" : t.tripType === "round_trip" ? "Round Trip" : "One Way"}
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {t.truckNumber && <span style={{ background: C.bg, color: C.dim, borderRadius: 8, padding: "4px 10px", fontSize: 12 }}>🚛 {t.truckNumber}</span>}
+                          {t.trailerNumber && <span style={{ background: C.bg, color: C.dim, borderRadius: 8, padding: "4px 10px", fontSize: 12 }}>TRL: {t.trailerNumber}</span>}
+                          {t.trip1LoadType && <span style={{ background: C.bg, color: C.muted, borderRadius: 8, padding: "4px 10px", fontSize: 12 }}>{t.trip1LoadType}</span>}
+                          {t.hasStraps && <span style={{ background: "#052e16", color: "#4ade80", borderRadius: 8, padding: "4px 10px", fontSize: 12 }}>✅ Straps</span>}
+                          {tripLocs.length > 0 && <span style={{ background: "#0f2236", color: "#60a5fa", borderRadius: 8, padding: "4px 10px", fontSize: 12 }}>📍 {tripLocs.length} pings</span>}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </>}
 
         {/* ── MAP ── */}
         {tab === "map" && <>
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ fontWeight: 700, color: C.text, marginBottom: 6 }}>🗺 Live Route Map</div>
-            <div style={{ fontSize: 13, color: C.muted }}>
-              Showing {activeTrips.length} active route{activeTrips.length !== 1 ? "s" : ""} · updates automatically
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>🗺️ Live Route Map</div>
+              <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{activeTrips.length} active route{activeTrips.length !== 1 ? "s" : ""} · auto-updates</div>
             </div>
           </div>
           <TripMap activeTrips={activeTrips} locations={locations} />
           {activeTrips.length > 0 && (
-            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
-              {["#f97316","#3b82f6","#22c55e","#a855f7","#ec4899","#eab308"].slice(0, activeTrips.length).map((color, i) => (
-                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-                  <div style={{ width: 24, height: 4, borderRadius: 2, background: color }} />
-                  <span style={{ color: C.text }}>{activeTrips[i].driver}</span>
-                  <span style={{ color: C.muted }}>{activeTrips[i].truckNumber}</span>
-                </div>
-              ))}
+            <div style={{ marginTop: 14, background: C.card, borderRadius: 12, padding: 14, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>Legend</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {["#f97316","#3b82f6","#22c55e","#a855f7","#ec4899","#eab308"].slice(0, activeTrips.length).map((color, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13 }}>
+                    <div style={{ width: 28, height: 5, borderRadius: 3, background: color, flexShrink: 0 }} />
+                    <Avatar name={activeTrips[i].driver} size={24} />
+                    <span style={{ fontWeight: 600 }}>{activeTrips[i].driver}</span>
+                    {activeTrips[i].truckNumber && <span style={{ color: C.muted }}>· {activeTrips[i].truckNumber}</span>}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </>}
@@ -1022,266 +1194,333 @@ function ManagerDashboard({ onLogout }) {
         {/* ── TRIP LOG ── */}
         {tab === "log" && <>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
-            <select value={filterDriver} onChange={e => setFilterDriver(e.target.value)} style={{ ...inp, fontSize: 13, padding: "9px 12px" }}>
+            <select value={filterDriver} onChange={e => setFilterDriver(e.target.value)} style={{ ...inp, fontSize: 13, padding: "10px 12px" }}>
               <option value="All">All Drivers</option>
               {driverSet.map(d => <option key={d}>{d}</option>)}
             </select>
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{ ...inp, fontSize: 13, padding: "9px 12px" }}>
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{ ...inp, fontSize: 13, padding: "10px 12px" }}>
               <option value="All">All Statuses</option>
               {["Completed","In Progress","Needs Update"].map(s => <option key={s}>{s}</option>)}
             </select>
           </div>
 
           {editTrip && (
-            <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 14, border: `2px solid ${C.accent}` }}>
-              <div style={{ fontWeight: 700, color: C.accent, marginBottom: 14 }}>✏️ Edit Trip — {editTrip.driver}</div>
-              {[
-                { label: "Status",   key: "status",      type: "select", options: ["Completed","In Progress","Needs Update"] },
-                { label: "Trip End", key: "endDateTime", type: "datetime-local" },
-                { label: "Notes",    key: "notes",       type: "text" },
-              ].map(f => (
-                <div key={f.key} style={{ marginBottom: 12 }}>
-                  <label style={lbl}>{f.label}</label>
-                  {f.type === "select"
-                    ? <select value={editTrip[f.key] || ""} onChange={e => setEditTrip({ ...editTrip, [f.key]: e.target.value })} style={inp}>
-                        {f.options.map(o => <option key={o}>{o}</option>)}
-                      </select>
-                    : <input type={f.type} value={editTrip[f.key] || ""} onChange={e => setEditTrip({ ...editTrip, [f.key]: e.target.value })} style={inp} />
-                  }
+            <div style={{ background: C.card, borderRadius: 16, padding: 20, marginBottom: 16, border: `2px solid ${C.accent}` }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <Avatar name={editTrip.driver} size={32} />
+                  <div>
+                    <div style={{ fontWeight: 800, color: C.accent, fontSize: 15 }}>Edit Trip</div>
+                    <div style={{ fontSize: 12, color: C.muted }}>{editTrip.driver}</div>
+                  </div>
                 </div>
-              ))}
+                <button onClick={() => setEditTrip(null)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, color: C.muted, width: 30, height: 30, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
+              </div>
 
-              {/* Extra Pay */}
-              <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, marginBottom: 4 }}>
-                <div style={{ fontWeight: 700, color: C.text, marginBottom: 12, fontSize: 13 }}>💰 Extra Pay</div>
-                {editTrip.tripType !== "local" && (
-                  <div style={{ marginBottom: 12 }}>
-                    <label style={lbl}>Hours on Duty</label>
-                    <input type="number" step="0.5" min="0" max="30" value={editTrip.hoursOnDuty || ""}
-                      onChange={e => setEditTrip({ ...editTrip, hoursOnDuty: e.target.value })} style={inp} placeholder="0" />
-                    <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Extended duty +$10/hr after 15 hrs</div>
-                  </div>
-                )}
-                {editTrip.tripType === "local" && (
-                  <div style={{ marginBottom: 12 }}>
-                    <label style={lbl}>Hours Worked</label>
-                    <input type="number" step="0.5" min="0" max="24" value={editTrip.hoursWorked || ""}
-                      onChange={e => setEditTrip({ ...editTrip, hoursWorked: e.target.value })} style={inp} placeholder="0" />
-                    <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Extended duty +$25/hr after 12 hrs</div>
-                  </div>
-                )}
-                <div style={{ marginBottom: 12 }}>
-                  <label style={lbl}>Breakdown Hours (max $100/day)</label>
-                  <input type="number" step="0.5" min="0" max="10" value={editTrip.breakdownHours || ""}
-                    onChange={e => setEditTrip({ ...editTrip, breakdownHours: e.target.value })} style={inp} placeholder="0" />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+                <div>
+                  <label style={lbl}>Status</label>
+                  <select value={editTrip.status || ""} onChange={e => setEditTrip({ ...editTrip, status: e.target.value })} style={inp}>
+                    {["Completed","In Progress","Needs Update"].map(o => <option key={o}>{o}</option>)}
+                  </select>
                 </div>
-                <div style={{ marginBottom: 12 }}>
-                  <label style={lbl}>Detention Hours (max $150/day)</label>
-                  <input type="number" step="0.5" min="0" max="10" value={editTrip.detentionHours || ""}
-                    onChange={e => setEditTrip({ ...editTrip, detentionHours: e.target.value })} style={inp} placeholder="0" />
+                <div>
+                  <label style={lbl}>Notes</label>
+                  <input type="text" value={editTrip.notes || ""} onChange={e => setEditTrip({ ...editTrip, notes: e.target.value })} style={inp} />
                 </div>
-                <div style={{ marginBottom: 8 }}>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+                <div>
+                  <label style={lbl}>Clock In</label>
+                  <input type="datetime-local" value={isoToLocal(editTrip.startDateTime)}
+                    onChange={e => setEditTrip({ ...editTrip, startDateTime: localToISO(e.target.value) })} style={inp} />
+                </div>
+                <div>
+                  <label style={lbl}>Clock Out</label>
+                  <input type="datetime-local" value={isoToLocal(editTrip.endDateTime)}
+                    onChange={e => setEditTrip({ ...editTrip, endDateTime: localToISO(e.target.value) })} style={inp} />
+                </div>
+              </div>
+
+              <div style={{ background: C.bg, borderRadius: 12, padding: 14, marginBottom: 14 }}>
+                <div style={{ fontWeight: 700, color: C.text, marginBottom: 12, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>💰 Extra Pay Adjustments</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  {editTrip.tripType !== "local" && (
+                    <div>
+                      <label style={lbl}>Hours on Duty</label>
+                      <input type="number" step="0.5" min="0" max="30" value={editTrip.hoursOnDuty || ""}
+                        onChange={e => setEditTrip({ ...editTrip, hoursOnDuty: e.target.value })} style={inp} placeholder="0" />
+                    </div>
+                  )}
+                  {editTrip.tripType === "local" && (
+                    <div>
+                      <label style={lbl}>Hours Worked</label>
+                      <input type="number" step="0.5" min="0" max="24" value={editTrip.hoursWorked || ""}
+                        onChange={e => setEditTrip({ ...editTrip, hoursWorked: e.target.value })} style={inp} placeholder="0" />
+                    </div>
+                  )}
+                  <div>
+                    <label style={lbl}>Breakdown Hrs</label>
+                    <input type="number" step="0.5" min="0" max="10" value={editTrip.breakdownHours || ""}
+                      onChange={e => setEditTrip({ ...editTrip, breakdownHours: e.target.value })} style={inp} placeholder="0" />
+                  </div>
+                  <div>
+                    <label style={lbl}>Detention Hrs</label>
+                    <input type="number" step="0.5" min="0" max="10" value={editTrip.detentionHours || ""}
+                      onChange={e => setEditTrip({ ...editTrip, detentionHours: e.target.value })} style={inp} placeholder="0" />
+                  </div>
+                </div>
+                <div style={{ marginTop: 10 }}>
                   <label style={lbl}>Back to Terminal (+$70)</label>
                   <button onClick={() => setEditTrip({ ...editTrip, backToTerminal: !editTrip.backToTerminal })}
-                    style={{ width: "100%", border: `2px solid ${editTrip.backToTerminal ? C.accent : C.border}`, borderRadius: 10, padding: "11px 14px",
+                    style={{ width: "100%", border: `2px solid ${editTrip.backToTerminal ? C.accent : C.border}`, borderRadius: 10, padding: "10px 14px",
                       background: editTrip.backToTerminal ? "#2a1a0e" : C.bg, color: editTrip.backToTerminal ? C.accent : C.dim,
                       fontWeight: 600, fontSize: 14, cursor: "pointer", textAlign: "left" }}>
-                    {editTrip.backToTerminal ? "✓ Yes" : "No"}
+                    {editTrip.backToTerminal ? "✓ Yes — Back to Terminal" : "No"}
                   </button>
                 </div>
                 {(() => {
                   const dr = drivers.find(d => d.driver_name === editTrip.driver);
                   if (!dr) return null;
                   return (
-                    <div style={{ background: C.bg, borderRadius: 8, padding: "10px 14px", display: "flex", justifyContent: "space-between" }}>
+                    <div style={{ marginTop: 10, background: C.card, borderRadius: 10, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span style={{ color: C.muted, fontSize: 13 }}>Estimated Pay</span>
-                      <span style={{ color: "#4ade80", fontWeight: 800, fontSize: 18 }}>${calculatePay(editTrip, dr.rate).toFixed(2)}</span>
+                      <span style={{ color: "#4ade80", fontWeight: 800, fontSize: 22 }}>${calculatePay(editTrip, dr.rate).toFixed(2)}</span>
                     </div>
                   );
                 })()}
               </div>
 
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                <button onClick={() => saveEdit(editTrip)} style={{ ...btn(), flex: 1 }}>Save</button>
-                <button onClick={() => setEditTrip(null)} style={{ ...btn("secondary"), flex: "0 0 80px" }}>Cancel</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => saveEdit(editTrip)} style={{ ...btn(), flex: 1, padding: "13px" }}>✓ Save Changes</button>
+                <button onClick={() => deleteTrip(editTrip.id, editTrip.driver)}
+                  style={{ background: "#1a0a0a", border: "1px solid #dc2626", borderRadius: 10, color: "#fca5a5", padding: "13px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                  🗑
+                </button>
               </div>
-              <button onClick={() => deleteTrip(editTrip.id, editTrip.driver)}
-                style={{ marginTop: 8, border: "1px solid #dc2626", borderRadius: 10, padding: "10px", fontWeight: 700, fontSize: 13, cursor: "pointer", width: "100%", background: "#1a0a0a", color: "#fca5a5" }}>
-                🗑 Delete
-              </button>
             </div>
           )}
 
-          {filtered.length === 0 && <div style={{ textAlign: "center", color: C.muted, padding: "48px 0" }}>No trips this week.</div>}
+          {routeTrip && <TripRouteMap trip={routeTrip} onClose={() => setRouteTrip(null)} />}
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {[...filtered].sort((a,b) => new Date(b.startDateTime)-new Date(a.startDateTime)).map(t => {
-              const sc = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
-              const localTrip = t.tripType === "local";
-              return (
-                <div key={t.id} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-                    <div style={{ width: 10, height: 10, borderRadius: "50%", background: sc.dot, marginTop: 5, flexShrink: 0 }} />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                        <span style={{ fontWeight: 700, fontSize: 15 }}>{t.driver}</span>
-                        <span style={{ background: sc.bg, color: sc.text, borderRadius: 5, padding: "2px 8px", fontSize: 11, fontWeight: 700 }}>{t.status}</span>
-                        {t.truckNumber && <span style={{ background: C.bg, color: C.dim, borderRadius: 5, padding: "2px 7px", fontSize: 11 }}>🚛 {t.truckNumber}</span>}
-                        {localTrip && <span style={{ background: "#1a2840", color: "#60a5fa", borderRadius: 5, padding: "2px 7px", fontSize: 11 }}>🏙 Local</span>}
-                        {t.tripType === "round_trip" && <span style={{ background: "#052e16", color: "#4ade80", borderRadius: 5, padding: "2px 7px", fontSize: 11 }}>↩ RT</span>}
+          {filtered.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "48px 0", color: C.muted }}>No trips found for the selected filters.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {[...filtered].sort((a,b) => new Date(b.startDateTime)-new Date(a.startDateTime)).map(t => {
+                const sc = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
+                const localTrip = t.tripType === "local";
+                const isEditing = editTrip?.id === t.id;
+                const isViewingRoute = routeTrip?.id === t.id;
+                return (
+                  <div key={t.id} style={{ background: isEditing ? C.surface : C.card, borderRadius: 14, padding: "14px 16px", border: `1px solid ${isEditing ? C.accent : isViewingRoute ? "#f97316" : C.border}`, transition: "all 0.15s" }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                      <Avatar name={t.driver} size={36} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 5 }}>
+                          <span style={{ fontWeight: 700, fontSize: 15 }}>{t.driver}</span>
+                          <span style={{ background: sc.bg, color: sc.text, borderRadius: 6, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>{t.status}</span>
+                          {t.truckNumber && <span style={{ background: C.bg, color: C.dim, borderRadius: 6, padding: "2px 8px", fontSize: 11 }}>🚛 {t.truckNumber}</span>}
+                          {t.trailerNumber && <span style={{ background: C.bg, color: C.dim, borderRadius: 6, padding: "2px 8px", fontSize: 11 }}>TRL1: {t.trailerNumber}</span>}
+                          {t.trailer2Number && <span style={{ background: "#0f2236", color: "#60a5fa", borderRadius: 6, padding: "2px 8px", fontSize: 11 }}>TRL2: {t.trailer2Number}</span>}
+                          {localTrip && <span style={{ background: "#1a2840", color: "#60a5fa", borderRadius: 6, padding: "2px 8px", fontSize: 11 }}>🏙 Local</span>}
+                          {t.tripType === "round_trip" && <span style={{ background: "#052e16", color: "#4ade80", borderRadius: 6, padding: "2px 8px", fontSize: 11 }}>↩ RT</span>}
+                        </div>
+                        <div style={{ color: C.muted, fontSize: 12, marginBottom: 3 }}>
+                          {t.originCity && <span>{t.originCity === "Cali" ? "🌴 Cali" : "🎰 Vegas"} · </span>}
+                          {localTrip ? "Local Shift" : <>{t.trip1LoadType}{t.trip2LoadType ? ` / ${t.trip2LoadType}` : ""}</>}
+                        </div>
+                        <div style={{ color: C.dim, fontSize: 12 }}>
+                          🕐 {fmt(t.startDateTime)} → {t.endDateTime ? fmt(t.endDateTime) : <span style={{ color: "#f59e0b" }}>Active</span>}
+                          {tripDuration(t.startDateTime, t.endDateTime) && <span style={{ color: C.muted }}> · {tripDuration(t.startDateTime, t.endDateTime)}</span>}
+                        </div>
+                        {t.notes && <div style={{ color: C.muted, fontSize: 12, marginTop: 3 }}>📝 {t.notes}</div>}
                       </div>
-                      <div style={{ color: C.muted, fontSize: 13 }}>
-                        {t.originCity && <span style={{ color: C.dim }}>{t.originCity === "Cali" ? "🌴 Cali" : "🎰 Vegas"} · </span>}
-                        {localTrip ? "Local Shift" : <>{t.trip1LoadType}{t.trip2LoadType ? ` / ${t.trip2LoadType}` : ""}</>}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                        <button onClick={() => setEditTrip(isEditing ? null : { ...t })}
+                          style={{ background: isEditing ? C.accent : C.surface, border: `1px solid ${isEditing ? C.accent : C.border}`, color: isEditing ? "#fff" : C.dim, borderRadius: 8, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+                          {isEditing ? "✕ Close" : "Edit"}
+                        </button>
+                        <button onClick={() => setRouteTrip(isViewingRoute ? null : t)}
+                          style={{ background: isViewingRoute ? "#f97316" : C.surface, border: `1px solid ${isViewingRoute ? "#f97316" : C.border}`, color: isViewingRoute ? "#fff" : C.muted, borderRadius: 8, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+                          📍 Route
+                        </button>
                       </div>
-                      <div style={{ color: C.dim, fontSize: 12, marginTop: 4 }}>
-                        🕐 {fmt(t.startDateTime)} → {t.endDateTime ? fmt(t.endDateTime) : <span style={{ color: "#f59e0b" }}>Active</span>}
-                        {tripDuration(t.startDateTime, t.endDateTime) && <span style={{ color: C.muted }}> · {tripDuration(t.startDateTime, t.endDateTime)}</span>}
-                      </div>
-                      {t.notes && <div style={{ color: C.muted, fontSize: 12, marginTop: 3 }}>📝 {t.notes}</div>}
                     </div>
-                    <button onClick={() => setEditTrip({ ...t })}
-                      style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 7, padding: "5px 11px", cursor: "pointer", fontSize: 12 }}>Edit</button>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </>}
 
         {/* ── PAYROLL ── */}
         {tab === "payroll" && <>
-          <div style={{ background: "#0a2218", border: "1px solid #14532d", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: "#4ade80" }}>
+          {payroll.length > 0 && (
+            <div style={{ background: "linear-gradient(135deg, #052e16, #0a2218)", border: "1px solid #22c55e33", borderRadius: 16, padding: "20px", marginBottom: 16, textAlign: "center" }}>
+              <div style={{ fontSize: 12, color: "#4ade80", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Week Total Payroll</div>
+              <div style={{ fontSize: 38, fontWeight: 800, color: "#4ade80", lineHeight: 1 }}>${weekPayTotal.toFixed(2)}</div>
+              <div style={{ color: "#86efac", fontSize: 13, marginTop: 6 }}>{payroll.reduce((s,r) => s + r.trips, 0)} completed trips · {payroll.length} drivers</div>
+            </div>
+          )}
+          <div style={{ background: "#0a1a0e", border: "1px solid #14532d", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: "#86efac" }}>
             ✅ Only <strong>Completed</strong> trips count toward pay.
           </div>
-          {payroll.length === 0 && <div style={{ textAlign: "center", color: C.muted, padding: "40px 0" }}>No trips logged this week.</div>}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {payroll.length === 0 && (
+            <div style={{ textAlign: "center", padding: "40px 0", color: C.muted }}>No trips logged this week.</div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {payroll.map(row => (
-              <div key={row.driver} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+              <div key={row.driver} style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px" }}>
+                  <Avatar name={row.driver} />
                   <div style={{ flex: 1 }}>
-                    <span style={{ fontWeight: 700, fontSize: 15 }}>{row.driver}</span>
-                    <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>{row.driverType} · ${row.rate}/trip</span>
+                    <div style={{ fontWeight: 700, fontSize: 15 }}>{row.driver}</div>
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+                      {row.driverType === "local" ? "🏙 Local" : "🚛 Regional"} · ${row.rate}/trip · {row.trips} trip{row.trips !== 1 ? "s" : ""}
+                      {row.pending > 0 && <span style={{ marginLeft: 6, background: "#7f1d1d", color: "#fca5a5", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>{row.pending} pending</span>}
+                    </div>
                   </div>
                   <div style={{ textAlign: "right" }}>
-                    <div style={{ fontSize: 20, fontWeight: 800, color: "#4ade80" }}>${row.total.toFixed(2)}</div>
-                    <div style={{ fontSize: 11, color: C.muted }}>{row.trips} completed</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: "#4ade80" }}>${row.total.toFixed(2)}</div>
                   </div>
                 </div>
-                {row.pending > 0 && <div style={{ background: "#7f1d1d", color: "#fca5a5", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, marginBottom: 8, display: "inline-block" }}>{row.pending} pending</div>}
-                <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-                  {row.tripList.sort((a,b) => new Date(a.startDateTime)-new Date(b.startDateTime)).map(t => {
-                    const sc = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
-                    const pay = t.status === "Completed" ? calculatePay(t, row.rate) : null;
-                    return (
-                      <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: sc.dot, flexShrink: 0 }} />
-                        <span style={{ color: C.muted }}>{new Date(t.startDateTime).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
-                        <span style={{ color: C.dim, flex: 1 }}>{t.tripType === "local" ? "Local" : t.tripType === "round_trip" ? "RT" : "OW"}{t.truckNumber ? ` · ${t.truckNumber}` : ""}</span>
-                        {pay !== null ? <span style={{ color: "#4ade80", fontWeight: 700 }}>${pay.toFixed(2)}</span> : <span style={{ color: "#f59e0b" }}>—</span>}
-                      </div>
-                    );
-                  })}
-                </div>
+                {row.tripList.length > 0 && (
+                  <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 16px", display: "flex", flexDirection: "column", gap: 6 }}>
+                    {row.tripList.sort((a,b) => new Date(a.startDateTime)-new Date(b.startDateTime)).map(t => {
+                      const sc = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
+                      const pay = t.status === "Completed" ? calculatePay(t, row.rate) : null;
+                      return (
+                        <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                          <div style={{ width: 7, height: 7, borderRadius: "50%", background: sc.dot, flexShrink: 0 }} />
+                          <span style={{ color: C.muted }}>{new Date(t.startDateTime).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
+                          <span style={{ color: C.dim, flex: 1 }}>{t.tripType === "local" ? "Local" : t.tripType === "round_trip" ? "RT" : "OW"}{t.truckNumber ? ` · ${t.truckNumber}` : ""}</span>
+                          {pay !== null ? <span style={{ color: "#4ade80", fontWeight: 700 }}>${pay.toFixed(2)}</span> : <span style={{ color: "#f59e0b", fontSize: 11 }}>Pending</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             ))}
           </div>
-          {payroll.length > 0 && (
-            <div style={{ background: "#0f2236", border: `1px solid ${C.blue}33`, borderRadius: 12, padding: "14px 16px", marginTop: 14, textAlign: "center" }}>
-              <div style={{ fontWeight: 700, color: "#93c5fd", marginBottom: 8 }}>📊 Week Total Payroll</div>
-              <div style={{ fontSize: 32, fontWeight: 800, color: "#4ade80" }}>${payroll.reduce((s,r) => s + r.total, 0).toFixed(2)}</div>
-              <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>{payroll.reduce((s,r) => s + r.trips, 0)} trips · {payroll.length} drivers</div>
-            </div>
-          )}
         </>}
 
         {/* ── DRIVERS ── */}
         {tab === "drivers" && <>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <div style={{ fontWeight: 700, color: C.text }}>Driver Roster ({drivers.length})</div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Driver Roster <span style={{ color: C.muted, fontWeight: 400, fontSize: 13 }}>({drivers.length})</span></div>
             <button onClick={() => { setAddDriverForm({ name: "", phone: "", email: "", rate: "", driver_type: "regional" }); setDriverError(""); }}
-              style={{ background: C.accent, border: "none", borderRadius: 8, color: "#fff", padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              style={{ background: C.accent, border: "none", borderRadius: 10, color: "#fff", padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
               + Add Driver
             </button>
           </div>
 
           {addDriverForm && (
-            <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 16, border: `2px solid ${C.accent}` }}>
-              <div style={{ fontWeight: 700, color: C.accent, marginBottom: 14 }}>➕ New Driver</div>
-              {[
-                { label: "Full Name *",             key: "name",  type: "text",   ph: "Carlos Martinez" },
-                { label: "Phone *",                 key: "phone", type: "tel",    ph: "702-555-1234" },
-                { label: "Email *",                 key: "email", type: "email",  ph: "driver@email.com" },
-                { label: "Rate ($/trip or shift) *", key: "rate",  type: "number", ph: "300" },
-              ].map(f => (
-                <div key={f.key} style={{ marginBottom: 12 }}>
-                  <label style={lbl}>{f.label}</label>
-                  <input type={f.type} value={addDriverForm[f.key]} placeholder={f.ph}
-                    onChange={e => setAddDriverForm({ ...addDriverForm, [f.key]: e.target.value })} style={inp} />
-                </div>
-              ))}
-              <div style={{ marginBottom: 12 }}>
+            <div style={{ background: C.card, borderRadius: 16, padding: 20, marginBottom: 16, border: `2px solid ${C.accent}` }}>
+              <div style={{ fontWeight: 800, color: C.accent, marginBottom: 16, fontSize: 15 }}>➕ New Driver</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {[
+                  { label: "Full Name *", key: "name",  type: "text",   ph: "Carlos Martinez" },
+                  { label: "Phone *",     key: "phone", type: "tel",    ph: "702-555-1234" },
+                  { label: "Email *",     key: "email", type: "email",  ph: "driver@email.com" },
+                  { label: "Rate ($/trip) *", key: "rate", type: "number", ph: "300" },
+                ].map(f => (
+                  <div key={f.key}>
+                    <label style={lbl}>{f.label}</label>
+                    <input type={f.type} value={addDriverForm[f.key]} placeholder={f.ph}
+                      onChange={e => setAddDriverForm({ ...addDriverForm, [f.key]: e.target.value })} style={inp} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 10, marginBottom: 14 }}>
                 <label style={lbl}>Driver Type *</label>
-                <select value={addDriverForm.driver_type} onChange={e => setAddDriverForm({ ...addDriverForm, driver_type: e.target.value })} style={inp}>
-                  <option value="regional">Regional</option>
-                  <option value="local">Local</option>
-                </select>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {[["regional","🚛 Regional"],["local","🏙 Local"]].map(([val, label]) => (
+                    <button key={val} onClick={() => setAddDriverForm({ ...addDriverForm, driver_type: val })}
+                      style={{ border: `2px solid ${addDriverForm.driver_type === val ? C.accent : C.border}`, borderRadius: 10, padding: "11px", background: addDriverForm.driver_type === val ? "#2a1a0e" : C.bg, color: addDriverForm.driver_type === val ? C.accent : C.dim, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
               {driverError && <div style={{ color: "#fca5a5", fontSize: 13, marginBottom: 10 }}>{driverError}</div>}
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={saveNewDriver} disabled={driverSaving} style={{ ...btn(), flex: 1 }}>{driverSaving ? "Saving…" : "Add Driver"}</button>
-                <button onClick={() => { setAddDriverForm(null); setDriverError(""); }} style={{ ...btn("secondary"), flex: "0 0 80px" }}>Cancel</button>
+                <button onClick={saveNewDriver} disabled={driverSaving} style={{ ...btn(), flex: 1, padding: "13px" }}>{driverSaving ? "Saving…" : "Add Driver"}</button>
+                <button onClick={() => { setAddDriverForm(null); setDriverError(""); }} style={{ ...btn("secondary"), flex: "0 0 90px" }}>Cancel</button>
               </div>
             </div>
           )}
 
           {editDriver && (
-            <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 16, border: `2px solid ${C.blue}` }}>
-              <div style={{ fontWeight: 700, color: "#60a5fa", marginBottom: 14 }}>✏️ Edit — {editDriver.driver_name}</div>
-              {[
-                { label: "Phone",    key: "phone", type: "tel" },
-                { label: "Email",    key: "email", type: "email" },
-                { label: "Rate ($)", key: "rate",  type: "number" },
-              ].map(f => (
-                <div key={f.key} style={{ marginBottom: 12 }}>
-                  <label style={lbl}>{f.label}</label>
-                  <input type={f.type} value={editDriver[f.key] || ""} onChange={e => setEditDriver({ ...editDriver, [f.key]: e.target.value })} style={inp} />
+            <div style={{ background: C.card, borderRadius: 16, padding: 20, marginBottom: 16, border: `2px solid #3b82f6` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                <Avatar name={editDriver.driver_name} />
+                <div>
+                  <div style={{ fontWeight: 800, color: "#60a5fa", fontSize: 15 }}>Edit Driver</div>
+                  <div style={{ fontSize: 12, color: C.muted }}>{editDriver.driver_name}</div>
                 </div>
-              ))}
-              <div style={{ marginBottom: 12 }}>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {[
+                  { label: "Phone", key: "phone", type: "tel" },
+                  { label: "Email", key: "email", type: "email" },
+                  { label: "Rate ($)", key: "rate", type: "number" },
+                ].map(f => (
+                  <div key={f.key}>
+                    <label style={lbl}>{f.label}</label>
+                    <input type={f.type} value={editDriver[f.key] || ""} onChange={e => setEditDriver({ ...editDriver, [f.key]: e.target.value })} style={inp} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 10, marginBottom: 14 }}>
                 <label style={lbl}>Driver Type</label>
-                <select value={editDriver.driver_type} onChange={e => setEditDriver({ ...editDriver, driver_type: e.target.value })} style={inp}>
-                  <option value="regional">Regional</option>
-                  <option value="local">Local</option>
-                </select>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {[["regional","🚛 Regional"],["local","🏙 Local"]].map(([val, label]) => (
+                    <button key={val} onClick={() => setEditDriver({ ...editDriver, driver_type: val })}
+                      style={{ border: `2px solid ${editDriver.driver_type === val ? C.accent : C.border}`, borderRadius: 10, padding: "11px", background: editDriver.driver_type === val ? "#2a1a0e" : C.bg, color: editDriver.driver_type === val ? C.accent : C.dim, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
               {driverError && <div style={{ color: "#fca5a5", fontSize: 13, marginBottom: 10 }}>{driverError}</div>}
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={saveDriverEdit} disabled={driverSaving} style={{ ...btn(), flex: 1 }}>{driverSaving ? "Saving…" : "Save"}</button>
-                <button onClick={() => { setEditDriver(null); setDriverError(""); }} style={{ ...btn("secondary"), flex: "0 0 80px" }}>Cancel</button>
+                <button onClick={saveDriverEdit} disabled={driverSaving} style={{ ...btn(), flex: 1, padding: "13px" }}>{driverSaving ? "Saving…" : "Save Changes"}</button>
+                <button onClick={() => { setEditDriver(null); setDriverError(""); }} style={{ ...btn("secondary"), flex: "0 0 90px" }}>Cancel</button>
               </div>
             </div>
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {drivers.map(d => (
-              <div key={d.driver_name} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                <div style={{ display: "flex", alignItems: "flex-start" }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 700, fontSize: 15 }}>{d.driver_name}</div>
-                    <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>{d.driver_type === "local" ? "🏙 Local" : "🚛 Regional"} · ${d.rate}/trip</div>
-                    {d.phone && <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>📞 {d.phone}</div>}
-                    {d.email && <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>✉️ {d.email}</div>}
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button onClick={() => { setEditDriver({ ...d }); setDriverError(""); }}
-                      style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 7, padding: "5px 10px", cursor: "pointer", fontSize: 11 }}>Edit</button>
-                    <button onClick={() => resetPin(d.driver_name)}
-                      style={{ background: "#1a2040", border: "1px solid #dc2626", color: "#fca5a5", borderRadius: 7, padding: "5px 10px", cursor: "pointer", fontSize: 11 }}>Reset PIN</button>
+            {drivers.map(d => {
+              const isActive = activeTrips.some(t => t.driver === d.driver_name);
+              const weekCount = weekTrips.filter(t => t.driver === d.driver_name).length;
+              return (
+                <div key={d.driver_name} style={{ background: C.card, borderRadius: 14, padding: "14px 16px", border: `1px solid ${isActive ? "#22c55e33" : C.border}` }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ position: "relative" }}>
+                      <Avatar name={d.driver_name} />
+                      {isActive && <span style={{ position: "absolute", bottom: 0, right: 0, width: 11, height: 11, borderRadius: "50%", background: "#22c55e", border: `2px solid ${C.card}`, boxShadow: "0 0 5px #22c55e" }} />}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{d.driver_name}</div>
+                      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+                        {d.driver_type === "local" ? "🏙 Local" : "🚛 Regional"} · ${d.rate}/trip
+                        {weekCount > 0 && <span style={{ marginLeft: 6, color: C.accent }}>{weekCount} trip{weekCount !== 1 ? "s" : ""} this week</span>}
+                      </div>
+                      {d.phone && <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>📞 {d.phone}</div>}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      <button onClick={() => { setEditDriver({ ...d }); setDriverError(""); }}
+                        style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 7, padding: "5px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Edit</button>
+                      <button onClick={() => resetPin(d.driver_name)}
+                        style={{ background: "#1a0808", border: "1px solid #dc262655", color: "#fca5a5", borderRadius: 7, padding: "5px 12px", cursor: "pointer", fontSize: 11 }}>Reset PIN</button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </>}
 
@@ -1292,13 +1531,13 @@ function ManagerDashboard({ onLogout }) {
 
 // ── PAGES ─────────────────────────────────────────────────────────────────────
 function ManagerPage() {
-  const [authed, setAuthed] = useState(() => sessionStorage.getItem("managerAuth") === "true");
+  const [authed, setAuthed] = useState(() => localStorage.getItem("managerAuth") === "true");
   if (!authed) return <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 480, margin: "0 auto" }}><ManagerLogin onLogin={() => setAuthed(true)} /></div>;
   return <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 900, margin: "0 auto" }}><ManagerDashboard onLogout={() => setAuthed(false)} /></div>;
 }
 
 function DriverPage() {
-  const stored = sessionStorage.getItem("driverAuth");
+  const stored = localStorage.getItem("driverAuth");
   const [driver, setDriver] = useState(() => stored ? JSON.parse(stored) : null);
   const [view, setView]     = useState("pretrip"); // pretrip | setup | driving
   const [preTripData, setPreTripData] = useState(null);
@@ -1321,7 +1560,7 @@ function DriverPage() {
   }, [driver]);
 
   function handleLogout() {
-    sessionStorage.removeItem("driverAuth");
+    localStorage.removeItem("driverAuth");
     setDriver(null); setView("pretrip"); setPreTripData(null); setActiveTrip(null);
   }
 
