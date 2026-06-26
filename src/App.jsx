@@ -1066,3 +1066,300 @@ function ManagerDashboard({ onLogout }) {
                   <div style={{ marginBottom: 12 }}>
                     <label style={lbl}>Hours Worked</label>
                     <input type="number" step="0.5" min="0" max="24" value={editTrip.hoursWorked || ""}
+                      onChange={e => setEditTrip({ ...editTrip, hoursWorked: e.target.value })} style={inp} placeholder="0" />
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Extended duty +$25/hr after 12 hrs</div>
+                  </div>
+                )}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={lbl}>Breakdown Hours (max $100/day)</label>
+                  <input type="number" step="0.5" min="0" max="10" value={editTrip.breakdownHours || ""}
+                    onChange={e => setEditTrip({ ...editTrip, breakdownHours: e.target.value })} style={inp} placeholder="0" />
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={lbl}>Detention Hours (max $150/day)</label>
+                  <input type="number" step="0.5" min="0" max="10" value={editTrip.detentionHours || ""}
+                    onChange={e => setEditTrip({ ...editTrip, detentionHours: e.target.value })} style={inp} placeholder="0" />
+                </div>
+                <div style={{ marginBottom: 8 }}>
+                  <label style={lbl}>Back to Terminal (+$70)</label>
+                  <button onClick={() => setEditTrip({ ...editTrip, backToTerminal: !editTrip.backToTerminal })}
+                    style={{ width: "100%", border: `2px solid ${editTrip.backToTerminal ? C.accent : C.border}`, borderRadius: 10, padding: "11px 14px",
+                      background: editTrip.backToTerminal ? "#2a1a0e" : C.bg, color: editTrip.backToTerminal ? C.accent : C.dim,
+                      fontWeight: 600, fontSize: 14, cursor: "pointer", textAlign: "left" }}>
+                    {editTrip.backToTerminal ? "✓ Yes" : "No"}
+                  </button>
+                </div>
+                {(() => {
+                  const dr = drivers.find(d => d.driver_name === editTrip.driver);
+                  if (!dr) return null;
+                  return (
+                    <div style={{ background: C.bg, borderRadius: 8, padding: "10px 14px", display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ color: C.muted, fontSize: 13 }}>Estimated Pay</span>
+                      <span style={{ color: "#4ade80", fontWeight: 800, fontSize: 18 }}>${calculatePay(editTrip, dr.rate).toFixed(2)}</span>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button onClick={() => saveEdit(editTrip)} style={{ ...btn(), flex: 1 }}>Save</button>
+                <button onClick={() => setEditTrip(null)} style={{ ...btn("secondary"), flex: "0 0 80px" }}>Cancel</button>
+              </div>
+              <button onClick={() => deleteTrip(editTrip.id, editTrip.driver)}
+                style={{ marginTop: 8, border: "1px solid #dc2626", borderRadius: 10, padding: "10px", fontWeight: 700, fontSize: 13, cursor: "pointer", width: "100%", background: "#1a0a0a", color: "#fca5a5" }}>
+                🗑 Delete
+              </button>
+            </div>
+          )}
+
+          {filtered.length === 0 && <div style={{ textAlign: "center", color: C.muted, padding: "48px 0" }}>No trips this week.</div>}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {[...filtered].sort((a,b) => new Date(b.startDateTime)-new Date(a.startDateTime)).map(t => {
+              const sc = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
+              const localTrip = t.tripType === "local";
+              return (
+                <div key={t.id} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <div style={{ width: 10, height: 10, borderRadius: "50%", background: sc.dot, marginTop: 5, flexShrink: 0 }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                        <span style={{ fontWeight: 700, fontSize: 15 }}>{t.driver}</span>
+                        <span style={{ background: sc.bg, color: sc.text, borderRadius: 5, padding: "2px 8px", fontSize: 11, fontWeight: 700 }}>{t.status}</span>
+                        {t.truckNumber && <span style={{ background: C.bg, color: C.dim, borderRadius: 5, padding: "2px 7px", fontSize: 11 }}>🚛 {t.truckNumber}</span>}
+                        {localTrip && <span style={{ background: "#1a2840", color: "#60a5fa", borderRadius: 5, padding: "2px 7px", fontSize: 11 }}>🏙 Local</span>}
+                        {t.tripType === "round_trip" && <span style={{ background: "#052e16", color: "#4ade80", borderRadius: 5, padding: "2px 7px", fontSize: 11 }}>↩ RT</span>}
+                      </div>
+                      <div style={{ color: C.muted, fontSize: 13 }}>
+                        {t.originCity && <span style={{ color: C.dim }}>{t.originCity === "Cali" ? "🌴 Cali" : "🎰 Vegas"} · </span>}
+                        {localTrip ? "Local Shift" : <>{t.trip1LoadType}{t.trip2LoadType ? ` / ${t.trip2LoadType}` : ""}</>}
+                      </div>
+                      <div style={{ color: C.dim, fontSize: 12, marginTop: 4 }}>
+                        🕐 {fmt(t.startDateTime)} → {t.endDateTime ? fmt(t.endDateTime) : <span style={{ color: "#f59e0b" }}>Active</span>}
+                        {tripDuration(t.startDateTime, t.endDateTime) && <span style={{ color: C.muted }}> · {tripDuration(t.startDateTime, t.endDateTime)}</span>}
+                      </div>
+                      {t.notes && <div style={{ color: C.muted, fontSize: 12, marginTop: 3 }}>📝 {t.notes}</div>}
+                    </div>
+                    <button onClick={() => setEditTrip({ ...t })}
+                      style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 7, padding: "5px 11px", cursor: "pointer", fontSize: 12 }}>Edit</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>}
+
+        {/* ── PAYROLL ── */}
+        {tab === "payroll" && <>
+          <div style={{ background: "#0a2218", border: "1px solid #14532d", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: "#4ade80" }}>
+            ✅ Only <strong>Completed</strong> trips count toward pay.
+          </div>
+          {payroll.length === 0 && <div style={{ textAlign: "center", color: C.muted, padding: "40px 0" }}>No trips logged this week.</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {payroll.map(row => (
+              <div key={row.driver} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontWeight: 700, fontSize: 15 }}>{row.driver}</span>
+                    <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>{row.driverType} · ${row.rate}/trip</span>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: "#4ade80" }}>${row.total.toFixed(2)}</div>
+                    <div style={{ fontSize: 11, color: C.muted }}>{row.trips} completed</div>
+                  </div>
+                </div>
+                {row.pending > 0 && <div style={{ background: "#7f1d1d", color: "#fca5a5", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, marginBottom: 8, display: "inline-block" }}>{row.pending} pending</div>}
+                <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {row.tripList.sort((a,b) => new Date(a.startDateTime)-new Date(b.startDateTime)).map(t => {
+                    const sc = STATUS_COLORS[t.status] || STATUS_COLORS["Needs Update"];
+                    const pay = t.status === "Completed" ? calculatePay(t, row.rate) : null;
+                    return (
+                      <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: sc.dot, flexShrink: 0 }} />
+                        <span style={{ color: C.muted }}>{new Date(t.startDateTime).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
+                        <span style={{ color: C.dim, flex: 1 }}>{t.tripType === "local" ? "Local" : t.tripType === "round_trip" ? "RT" : "OW"}{t.truckNumber ? ` · ${t.truckNumber}` : ""}</span>
+                        {pay !== null ? <span style={{ color: "#4ade80", fontWeight: 700 }}>${pay.toFixed(2)}</span> : <span style={{ color: "#f59e0b" }}>—</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+          {payroll.length > 0 && (
+            <div style={{ background: "#0f2236", border: `1px solid ${C.blue}33`, borderRadius: 12, padding: "14px 16px", marginTop: 14, textAlign: "center" }}>
+              <div style={{ fontWeight: 700, color: "#93c5fd", marginBottom: 8 }}>📊 Week Total Payroll</div>
+              <div style={{ fontSize: 32, fontWeight: 800, color: "#4ade80" }}>${payroll.reduce((s,r) => s + r.total, 0).toFixed(2)}</div>
+              <div style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>{payroll.reduce((s,r) => s + r.trips, 0)} trips · {payroll.length} drivers</div>
+            </div>
+          )}
+        </>}
+
+        {/* ── DRIVERS ── */}
+        {tab === "drivers" && <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div style={{ fontWeight: 700, color: C.text }}>Driver Roster ({drivers.length})</div>
+            <button onClick={() => { setAddDriverForm({ name: "", phone: "", email: "", rate: "", driver_type: "regional" }); setDriverError(""); }}
+              style={{ background: C.accent, border: "none", borderRadius: 8, color: "#fff", padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              + Add Driver
+            </button>
+          </div>
+
+          {addDriverForm && (
+            <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 16, border: `2px solid ${C.accent}` }}>
+              <div style={{ fontWeight: 700, color: C.accent, marginBottom: 14 }}>➕ New Driver</div>
+              {[
+                { label: "Full Name *",             key: "name",  type: "text",   ph: "Carlos Martinez" },
+                { label: "Phone *",                 key: "phone", type: "tel",    ph: "702-555-1234" },
+                { label: "Email *",                 key: "email", type: "email",  ph: "driver@email.com" },
+                { label: "Rate ($/trip or shift) *", key: "rate",  type: "number", ph: "300" },
+              ].map(f => (
+                <div key={f.key} style={{ marginBottom: 12 }}>
+                  <label style={lbl}>{f.label}</label>
+                  <input type={f.type} value={addDriverForm[f.key]} placeholder={f.ph}
+                    onChange={e => setAddDriverForm({ ...addDriverForm, [f.key]: e.target.value })} style={inp} />
+                </div>
+              ))}
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Driver Type *</label>
+                <select value={addDriverForm.driver_type} onChange={e => setAddDriverForm({ ...addDriverForm, driver_type: e.target.value })} style={inp}>
+                  <option value="regional">Regional</option>
+                  <option value="local">Local</option>
+                </select>
+              </div>
+              {driverError && <div style={{ color: "#fca5a5", fontSize: 13, marginBottom: 10 }}>{driverError}</div>}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={saveNewDriver} disabled={driverSaving} style={{ ...btn(), flex: 1 }}>{driverSaving ? "Saving…" : "Add Driver"}</button>
+                <button onClick={() => { setAddDriverForm(null); setDriverError(""); }} style={{ ...btn("secondary"), flex: "0 0 80px" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {editDriver && (
+            <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 16, border: `2px solid ${C.blue}` }}>
+              <div style={{ fontWeight: 700, color: "#60a5fa", marginBottom: 14 }}>✏️ Edit — {editDriver.driver_name}</div>
+              {[
+                { label: "Phone",    key: "phone", type: "tel" },
+                { label: "Email",    key: "email", type: "email" },
+                { label: "Rate ($)", key: "rate",  type: "number" },
+              ].map(f => (
+                <div key={f.key} style={{ marginBottom: 12 }}>
+                  <label style={lbl}>{f.label}</label>
+                  <input type={f.type} value={editDriver[f.key] || ""} onChange={e => setEditDriver({ ...editDriver, [f.key]: e.target.value })} style={inp} />
+                </div>
+              ))}
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Driver Type</label>
+                <select value={editDriver.driver_type} onChange={e => setEditDriver({ ...editDriver, driver_type: e.target.value })} style={inp}>
+                  <option value="regional">Regional</option>
+                  <option value="local">Local</option>
+                </select>
+              </div>
+              {driverError && <div style={{ color: "#fca5a5", fontSize: 13, marginBottom: 10 }}>{driverError}</div>}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={saveDriverEdit} disabled={driverSaving} style={{ ...btn(), flex: 1 }}>{driverSaving ? "Saving…" : "Save"}</button>
+                <button onClick={() => { setEditDriver(null); setDriverError(""); }} style={{ ...btn("secondary"), flex: "0 0 80px" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {drivers.map(d => (
+              <div key={d.driver_name} style={{ background: C.card, borderRadius: 12, padding: "14px 16px", border: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", alignItems: "flex-start" }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15 }}>{d.driver_name}</div>
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>{d.driver_type === "local" ? "🏙 Local" : "🚛 Regional"} · ${d.rate}/trip</div>
+                    {d.phone && <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>📞 {d.phone}</div>}
+                    {d.email && <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>✉️ {d.email}</div>}
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => { setEditDriver({ ...d }); setDriverError(""); }}
+                      style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.dim, borderRadius: 7, padding: "5px 10px", cursor: "pointer", fontSize: 11 }}>Edit</button>
+                    <button onClick={() => resetPin(d.driver_name)}
+                      style={{ background: "#1a2040", border: "1px solid #dc2626", color: "#fca5a5", borderRadius: 7, padding: "5px 10px", cursor: "pointer", fontSize: 11 }}>Reset PIN</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>}
+
+      </div>
+    </div>
+  );
+}
+
+// ── PAGES ─────────────────────────────────────────────────────────────────────
+function ManagerPage() {
+  const [authed, setAuthed] = useState(() => sessionStorage.getItem("managerAuth") === "true");
+  if (!authed) return <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 480, margin: "0 auto" }}><ManagerLogin onLogin={() => setAuthed(true)} /></div>;
+  return <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 900, margin: "0 auto" }}><ManagerDashboard onLogout={() => setAuthed(false)} /></div>;
+}
+
+function DriverPage() {
+  const stored = sessionStorage.getItem("driverAuth");
+  const [driver, setDriver] = useState(() => stored ? JSON.parse(stored) : null);
+  const [view, setView]     = useState("pretrip"); // pretrip | setup | driving
+  const [preTripData, setPreTripData] = useState(null);
+  const [activeTrip, setActiveTrip]   = useState(null);
+
+  useEffect(() => {
+    if (!driver) return;
+    // Check for active trip
+    supabase.from("trips")
+      .select("*").eq("driver", driver.name).eq("status", "In Progress")
+      .order("start_date_time", { ascending: false }).limit(1)
+      .then(({ data }) => {
+        if (data && data.length > 0) {
+          setActiveTrip(tripFromDb(data[0]));
+          setView("driving");
+        } else {
+          setView("pretrip");
+        }
+      });
+  }, [driver]);
+
+  function handleLogout() {
+    sessionStorage.removeItem("driverAuth");
+    setDriver(null); setView("pretrip"); setPreTripData(null); setActiveTrip(null);
+  }
+
+  if (!driver) return (
+    <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 480, margin: "0 auto" }}>
+      <DriverLogin onLogin={info => { setDriver(info); }} />
+    </div>
+  );
+
+  return (
+    <div style={{ fontFamily: "'Inter','Segoe UI',sans-serif", maxWidth: 480, margin: "0 auto" }}>
+      {view === "pretrip" && (
+        <PreTripForm driver={driver} onLogout={handleLogout}
+          onNext={pt => { setPreTripData(pt); setView("setup"); }} />
+      )}
+      {view === "setup" && (
+        <ClockInSetup driver={driver} preTripData={preTripData}
+          onClockIn={trip => { setActiveTrip(trip); setView("driving"); }}
+          onBack={() => setView("pretrip")} />
+      )}
+      {view === "driving" && activeTrip && (
+        <DrivingScreen driver={driver} trip={activeTrip}
+          onClockOut={() => { setActiveTrip(null); setView("pretrip"); }}
+          onLogout={handleLogout} />
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/"        element={<Navigate to="/driver" replace />} />
+        <Route path="/driver"  element={<DriverPage />} />
+        <Route path="/manager" element={<ManagerPage />} />
+        <Route path="*"        element={<Navigate to="/driver" replace />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
